@@ -1,0 +1,16 @@
+# 임시 파일·로그 전용 폴더 (CLAUDE.md 작업 규칙 1)
+log/
+
+# 빌드 산출물
+edgetop
+*.o
+*.a
+*.so
+build/
+compile_commands.json
+
+# 에디터/OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
