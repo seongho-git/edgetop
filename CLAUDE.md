@@ -59,13 +59,19 @@ must also run on a generic Linux host without a GPU.
   `cpuinfo_cur_freq` is root-only.
 - **NVML costs 15 MB of private memory at `nvmlInit`** and nothing reduces it. Own RSS target is ≈ 1 MB
   without GPU, ≈ 20 MB with; do not add anything that grows per tick. `--no-gpu` must skip `dlopen` entirely.
-- **Budget: < 1 ms CPU per 1 s tick idle (measured 0.36–0.78 ms over several 20–30 s runs), < 2.5 ms under load (measured 1.76 ms),
+- **Budget: < 3.5 ms CPU per 1 s tick idle with the process list (measured 2.8 ms), < 1 ms without it
+  (measured 0.36–0.78 ms over several 20–30 s runs), under load see `docs/design.md`,
   0 heap allocations in the loop, 1 wakeup, 1 `write()`.** Hot-loop numbers (`--bench`) understate real cost
   6–10× because every source is cold after the sleep; judge changes with `make measure` and `make loadtest`,
   not `--bench` alone. Per-source hot/cold costs are in `docs/design.md`; `make profile` re-measures them.
-- Slow sources carry their last value between reads (thermal zones 2 s, NVML process list and clock-event
-  reasons 3 s, NVMe 10 s). Keep new expensive sources on such a cadence.
-- Thermal zones are unlabeled `acpitz`; GPU temperature must come from NVML.
+- Slow sources carry their last value between reads (`/proc` process scan 2 s, NVML process list and
+  clock-event reasons 3 s, NVMe 10 s). The process scan is the single largest cost (≈ 4 ms per scan for
+  560 processes) and is skipped when the panel is off or has no rows; keep new expensive sources on such
+  a cadence.
+- Thermal zones are `acpitz` with no label in `type`, but their ACPI path names them: `TSOC`, `TS<cluster>E`,
+  `TS<cluster>P`, `TGPU`, `TUNC` (`thermal.c` classifies on that; verified by loading each cluster). "cpu" is
+  the hottest SoC/core zone; GPU temperature comes from NVML, the ACPI GPU zone is shown as `gpu(acpi)`.
+  Zones are read every tick on purpose (accuracy over the ≈ 150 µs they cost).
 - Two core clusters (Cortex-X925 on cpus 5–9, 15–19; Cortex-A725 on 0–4, 10–14) identified via
   `midr_el1`. Group rows by cluster; fall back to one group when MIDR is unreadable.
 - No root. Everything is readable as an unprivileged user; do not add anything that needs `sudo`.
@@ -76,6 +82,8 @@ No `sudo` or extra packages are needed: gcc, make, libc headers, and the NVML ru
 
 ```sh
 make                     # build ./edgetop (objects in build/)
+make install             # to $PREFIX/bin; PREFIX defaults to ~/.local for a user, /usr/local for root
+make uninstall
 make debug               # rebuild with -O0 -g -fsanitize=address,undefined
 make test                # unit tests (run from tests/ so fixtures resolve)
 make test-one T=meminfo  # one test by name; names are listed at the bottom of tests/test_main.c
@@ -88,11 +96,12 @@ make profile             # hot/cold cost per source (tools/profile_sources.c aga
 make loadtest            # 40 s of CPU+GPU+memory load with screen, accuracy, and cost checks (GPU needs nvcc)
 make clean
 
-./edgetop                # TUI, 1 s refresh; keys q, +/-, p, g, c
+./edgetop                # TUI, 1 s refresh; keys q, +/-, p, g, s, c
 ./edgetop -d 0.5         # refresh interval in seconds (0.25-10)
 ./edgetop --once         # one window as text (colors only on a terminal)
 ./edgetop --json         # one window as JSON; --watch SEC streams NDJSON until SIGINT/SIGTERM
-./edgetop --no-gpu       # skip NVML entirely (RSS ~1.5 MB instead of ~20 MB)
+./edgetop --no-gpu       # skip NVML entirely (RSS ~1.7 MB instead of ~21 MB)
+./edgetop --no-procs     # skip the /proc scan (0.07 % instead of 0.28 % of one core)
 ```
 
 Verify TUI changes without a human at the terminal: `make snap` reconstructs the screen at several sizes,
@@ -111,7 +120,12 @@ sampler and view; only the output step differs.
 - `proc.c` parsers are pure functions over a buffer so `tests/` can feed fixtures captured from this machine.
 - `nvml.c` declares the NVML ABI itself (no `nvml.h`). A field that returns NOT_SUPPORTED is disabled for the
   rest of the run, and the renderer hides absent fields instead of printing zeros.
-- `render()` auto-switches to denser core cells when the other panels would not fit; below 60x12 it shows a
-  "too small" message rather than exiting.
+- `render()` gives the process list whatever rows remain and switches to denser core cells when that keeps
+  at least two process rows or when the fixed panels would not fit; `proc_rows_available()` mirrors that so
+  `main.c` can skip the `/proc` scan when the panel would be hidden. Below 60x12 it shows a "too small"
+  message rather than exiting.
+- `procs.c` reads `/proc/PID/stat` for every pid (fields counted from the last `)`; tpgid and nice can be
+  negative), sorts by pid and merges with the previous scan for cpu deltas; names come from `cmdline`
+  (first token, basename) once per new pid.
 - Terminal restore must stay async-signal-safe (`term_restore_now` uses only `write` and `tcsetattr`); the
   SIGTSTP/SIGCONT handlers rely on that.

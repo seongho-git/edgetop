@@ -100,14 +100,32 @@ mixed units (the NVML figure 97,886 MiB is 95.6 GiB, not 97.9) and double-counte
 
 ## Thermal sensors
 
-- `/sys/class/thermal/thermal_zone0..6`: all `type=acpitz`, backed by ACPI `LNXTHERM:00..06`,
-  **no labels**, one `critical` trip (zone0: 104.8 °C), no cooling devices, policy `step_wise`.
-  Readings at survey: 63.6 / 48.7 / 49.8 / 49.6 / 63.6 / 50.7 / 52.8 °C. Zones 0 and 4 are the
-  hottest and track each other; they are the best CPU proxy, but the mapping is a guess.
-- GPU temperature comes from NVML (48 °C) and is authoritative.
+- `/sys/class/thermal/thermal_zone0..6`: all `type=acpitz`, one `critical` trip at 104.8 °C, no cooling
+  devices, policy `step_wise`. The `type` carries no label, but the ACPI device path
+  (`/sys/class/thermal/thermal_zoneN/device/path`) does:
+
+  | zone | ACPI path | meaning | evidence |
+  |---|---|---|---|
+  | 0 | `\_TZ_.TSOC` | SoC, tracks the hottest cluster | rose with either cluster loaded |
+  | 1 | `\_TZ_.TS0E` | cluster 0 efficiency cores (A725, cpus 0–4) | |
+  | 2 | `\_TZ_.TS0P` | cluster 0 performance cores (X925, cpus 5–9) | 44 → 58 °C with cpus 5–9 spinning; others ≤ +5 |
+  | 3 | `\_TZ_.TS1E` | cluster 1 efficiency cores (A725, cpus 10–14) | 44 → 48 °C with cpus 10–14 spinning; others ≤ +3 |
+  | 4 | `\_TZ_.TS1P` | cluster 1 performance cores (X925, cpus 15–19) | |
+  | 5 | `\_TZ_.TGPU` | GPU, firmware sensor | 2–5 °C above NVML's die reading under load |
+  | 6 | `\_TZ_.TUNC` | uncore / memory controller | +8 °C during the X925 test |
+
+  Cluster ids come from `/sys/devices/system/cpu/cpuN/topology/cluster_id` (56 for cpus 0–9, 1144 for
+  10–19); each cluster holds five A725 and five X925 cores. The experiment (`taskset` spinners on one group
+  of five cores for 25 s, all zones sampled before, during, and after) is reproducible with the shell loop
+  recorded in `docs/design.md` §Accuracy.
+- GPU temperature from NVML is the GPU's own die sensor and is the value edgetop labels `gpu`; the ACPI
+  zone is shown as `gpu(acpi)`.
 - hwmon: `hwmon0 acpitz` (same 7 zones), `hwmon1 nvme` (Composite / Sensor 1 / Sensor 2, ≈ 44 °C),
   `hwmon2–5 mlx5` (NIC), `hwmon6 mt7925_phy0` (Wi-Fi). Only `nvme` has labels.
 - No `/sys/class/power_supply` entries (no battery, no reported PSU).
+- `/proc/stat` and `/proc/PID/stat` are in `USER_HZ` = 100 ticks per second (`getconf CLK_TCK`), so a
+  per-core or per-process CPU percentage over a 1 s window has 1 % resolution, the same as htop; the
+  kernel itself runs at `CONFIG_HZ=1000`.
 
 ## Measured costs of the monitoring process itself
 
@@ -119,8 +137,10 @@ mixed units (the NVML figure 97,886 MiB is 95.6 GiB, not 97.9) and double-counte
 | After `nvmlInit` | RSS 19.7 MB, **15.0 MB private anonymous**, 1 extra thread |
 | `nvmlInit` wall time | 5.2 ms |
 | Effect of `NVML_INIT_FLAG_NO_ATTACH`, `MALLOC_ARENA_MAX=1`, `malloc_trim(0)` | none (±10 kB) |
-| edgetop v0.1.0, steady state at 1 s, machine idle | 0.04–0.08 % of one core, RSS 20.4 MB (1.5 MB with `--no-gpu`) |
-| edgetop v0.1.0 while GPU at 88 % and 4 cores spinning | 0.18 % of one core |
+| edgetop, steady state at 1 s, machine idle, process list on | 0.28 % of one core, RSS 21 MB (1.7 MB with `--no-gpu`) |
+| edgetop, same with `--no-procs` | 0.04–0.08 % of one core, RSS 20.4 MB (1.4 MB with `--no-gpu`) |
+| edgetop while GPU at 87 % and 4 cores spinning | 0.87 % of one core with the process list, 0.18 % without |
+| A full `/proc` scan (readdir + `/proc/PID/stat` for ≈ 560 processes) | 1.8 ms hot, 3.3 ms cold, before parsing |
 | edgetop's effect on a pinned CPU benchmark / on GPU idle power | none measurable (36608 vs 36608 iterations; 11.46 vs 11.48 W) |
 | htop 3.3.0 / nvtop 3.0.2, same harness | 2.26 % / 0.80 % of one core, RSS 5.4 / 23 MB |
 

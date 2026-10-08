@@ -1,14 +1,15 @@
-#include <pwd.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/resource.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
 #include "sample.h"
 #include "util.h"
 
+#define PROC_PERIOD 2.0 /* a full /proc scan costs ~3 ms cold for ~600 processes */
+
 static char big[65536]; /* /proc/stat and /proc/meminfo; cpu lines come first if truncated */
+static struct proc_table proc_storage; /* ~1.4 MB of BSS; pages stay non-resident until scanned */
 
 static void read_ident(struct sampler *sp)
 {
@@ -38,6 +39,9 @@ int sampler_init(struct sampler *sp, int want_gpu)
 	read_ident(sp);
 	topo_init(&sp->topo);
 	thermal_init(&sp->th);
+	sp->procs = &proc_storage;
+	procs_init(sp->procs);
+	sp->procs_t = -1e9;
 	sp->gpu_on = want_gpu && gpu_init(&sp->gpu) == 0;
 	return 0;
 }
@@ -55,7 +59,7 @@ static double read_psi(int fd)
 	return read_fd(fd, buf, sizeof buf) > 0 ? parse_psi_avg10(buf) : -1;
 }
 
-void sampler_read(struct sampler *sp, struct sample *s)
+void sampler_read(struct sampler *sp, struct sample *s, int want_procs)
 {
 	char buf[256];
 	struct rusage ru;
@@ -80,6 +84,11 @@ void sampler_read(struct sampler *sp, struct sample *s)
 		gpu_read(&sp->gpu, &s->gpu, s->t);
 	else
 		s->gpu.have = 0;
+	if (want_procs && s->t - sp->procs_t >= PROC_PERIOD) {
+		procs_scan(sp->procs, s->t);
+		sp->procs_t = s->t;
+	}
+	s->nprocs = want_procs ? sp->procs->cur->n : 0;
 
 	/* schedstat is ns-exact; rusage is sampled at HZ and overstates sub-ms work */
 	if (read_fd(sp->fd_schedstat, buf, sizeof buf) > 0 && parse_u64(buf, &pages)) {
@@ -143,58 +152,11 @@ void mem_split(const struct meminfo *m, struct view *v)
 	v->m_gpu = used - v->m_apps - v->m_kernel;
 }
 
-static struct pid_entry *pid_lookup(struct sampler *sp, uint32_t pid, double now)
-{
-	struct pid_entry *slot = &sp->pids[0];
-	char path[64], buf[256];
-	struct stat st;
-	ssize_t n;
-
-	for (int i = 0; i < MAX_GPU_PROCS; i++) {
-		if (sp->pids[i].pid == pid) {
-			sp->pids[i].seen = now;
-			return &sp->pids[i];
-		}
-		if (sp->pids[i].seen < slot->seen)
-			slot = &sp->pids[i];
-	}
-	memset(slot, 0, sizeof *slot);
-	slot->pid = pid;
-	slot->seen = now;
-	strcpy(slot->name, "?");
-	strcpy(slot->user, "?");
-
-	/* argv[0] keeps names set via setproctitle (comm is cut at 15 chars) */
-	snprintf(path, sizeof path, "/proc/%u/cmdline", pid);
-	n = read_path(path, buf, sizeof buf);
-	if (n <= 0) {
-		snprintf(path, sizeof path, "/proc/%u/comm", pid);
-		n = read_path(path, buf, sizeof buf);
-	}
-	if (n > 0) {
-		char *base, *end = strpbrk(buf, "\n ");
-		if (end)
-			*end = '\0';
-		base = strrchr(buf, '/');
-		snprintf(slot->name, sizeof slot->name, "%.31s", base && base[1] ? base + 1 : buf);
-	}
-	snprintf(path, sizeof path, "/proc/%u", pid);
-	if (stat(path, &st) == 0) {
-		struct passwd *pw = getpwuid(st.st_uid);
-		slot->uid = st.st_uid;
-		if (pw)
-			snprintf(slot->user, sizeof slot->user, "%.15s", pw->pw_name);
-		else
-			snprintf(slot->user, sizeof slot->user, "%u", st.st_uid);
-	}
-	return slot;
-}
-
-void compute_view(struct sampler *sp, const struct sample *prev, const struct sample *cur,
+void compute_view(struct sampler *sp, const struct sample *prev, const struct sample *cur, int sort,
 		  struct view *v)
 {
 	double wall = cur->t - prev->t;
-	int best = TEMP_NONE;
+	int best = TEMP_NONE, best_any = TEMP_NONE;
 
 	v->s = cur;
 	v->sp = sp;
@@ -203,23 +165,23 @@ void compute_view(struct sampler *sp, const struct sample *prev, const struct sa
 	cpu_delta(&prev->total, &cur->total, &v->tot_user, &v->tot_sys, &v->tot_iowait);
 	mem_split(&cur->mem, v);
 
-	for (int i = 0; i < cur->nzones; i++)
-		if (cur->zone_mc[i] > best)
-			best = cur->zone_mc[i];
-	v->cpu_temp_mc = best;
+	/* "cpu" is the hottest zone known to sit on the CPU; without labels, the hottest zone of all */
+	for (int i = 0; i < cur->nzones; i++) {
+		int kind = sp->th.zone[i].kind, mc = cur->zone_mc[i];
+		if (mc == TEMP_NONE)
+			continue;
+		if (mc > best_any)
+			best_any = mc;
+		if ((kind == Z_SOC || kind == Z_PCORE || kind == Z_ECORE || kind == Z_CPUISH) && mc > best)
+			best = mc;
+	}
+	v->cpu_temp_labeled = best != TEMP_NONE;
+	v->cpu_temp_mc = v->cpu_temp_labeled ? best : best_any;
 	v->self_cpu_pct = wall > 0 ? 100.0 * (cur->self_cpu_s - prev->self_cpu_s) / wall : 0;
 
-	v->nproc = 0;
 	v->gpu_proc_kib = 0;
-	for (int i = 0; i < cur->gpu.nproc; i++) {
-		const struct gpu_proc *gp = &cur->gpu.procs[i];
-		struct pid_entry *e = pid_lookup(sp, gp->pid, cur->t);
-		struct view_proc vp = {gp->pid, gp->mem_bytes, e->name, e->user};
-		int j = v->nproc++;
-
-		v->gpu_proc_kib += gp->mem_bytes / 1024;
-		for (; j > 0 && v->procs[j - 1].mem_bytes < vp.mem_bytes; j--)
-			v->procs[j] = v->procs[j - 1];
-		v->procs[j] = vp;
-	}
+	v->gpu_proc_count = cur->gpu.nproc;
+	for (int i = 0; i < cur->gpu.nproc; i++)
+		v->gpu_proc_kib += cur->gpu.procs[i].mem_bytes / 1024;
+	v->nproc = cur->nprocs ? procs_top(sp->procs, &cur->gpu, sort, v->procs, MAX_VIEW_PROCS) : 0;
 }

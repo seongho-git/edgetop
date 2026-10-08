@@ -8,7 +8,14 @@
 #define MAX_GROUPS 8
 #define MAX_ZONES 16
 #define MAX_GPU_PROCS 64
+#define PROC_TABLE 4096
+#define MAX_VIEW_PROCS 64
+#define MAX_USERS 32
 #define TEMP_NONE INT_MIN
+
+enum sort_key { SORT_CPU, SORT_GPU, SORT_RSS, SORT_COUNT };
+
+enum zone_kind { Z_OTHER, Z_SOC, Z_PCORE, Z_ECORE, Z_GPU, Z_UNCORE, Z_CPUISH };
 
 struct cpu_times {
 	uint64_t user, nice, system, idle, iowait, irq, softirq, steal;
@@ -60,6 +67,7 @@ struct sample {
 	int zone_mc[MAX_ZONES];
 	int nvme_mc;
 	struct gpu_sample gpu;
+	int nprocs; /* processes seen by the last scan, 0 when scanning is off */
 	double self_cpu_s;
 	uint64_t self_rss_kb;
 };
@@ -82,11 +90,16 @@ struct topo {
 	double last_slow;
 };
 
+struct zone_info {
+	char label[12];
+	int kind; /* zone_kind */
+	int cluster;
+};
+
 struct thermal {
 	int nzones;
 	int zone_fd[MAX_ZONES];
-	int zone_last[MAX_ZONES];
-	double zone_t;
+	struct zone_info zone[MAX_ZONES];
 	int nvme_fd;
 	int nvme_last;
 	double nvme_t;
@@ -104,12 +117,36 @@ struct gpu {
 	struct gpu_proc procs[MAX_GPU_PROCS];
 };
 
-struct pid_entry {
+struct uid_name {
+	int used;
+	uint32_t uid;
+	char name[16];
+};
+
+struct proc_entry {
 	uint32_t pid;
 	uint32_t uid;
-	double seen;
-	char name[32];
-	char user[16];
+	uint64_t ticks; /* utime + stime in clock ticks */
+	uint64_t rss_pages;
+	double cpu_pct;
+	const char *user;
+	char state;
+	char comm[16];
+	char name[24];
+};
+
+struct proc_list {
+	int n;
+	double t;
+	struct proc_entry e[PROC_TABLE];
+};
+
+struct proc_table {
+	struct proc_list a, b;
+	struct proc_list *cur, *prev;
+	long clk_tck, page_kib;
+	unsigned nscans;
+	struct uid_name users[MAX_USERS];
 };
 
 struct sampler {
@@ -118,16 +155,20 @@ struct sampler {
 	struct gpu gpu;
 	int gpu_on;
 	int fd_stat, fd_meminfo, fd_loadavg, fd_psi_cpu, fd_psi_mem, fd_uptime, fd_statm, fd_schedstat;
-	struct pid_entry pids[MAX_GPU_PROCS];
+	struct proc_table *procs; /* static storage in sample.c; untouched (not resident) until the first scan */
+	double procs_t;
 	char host[64];
 	char product[64];
 };
 
 struct view_proc {
 	uint32_t pid;
-	uint64_t mem_bytes;
-	const char *name;
 	const char *user;
+	const char *name;
+	double cpu_pct;
+	uint64_t rss_kib;
+	uint64_t gpu_bytes;
+	char state;
 };
 
 struct view {
@@ -137,10 +178,12 @@ struct view {
 	double tot_user, tot_sys, tot_iowait;
 	uint64_t m_total, m_used, m_apps, m_gpu, m_kernel, m_cache, m_free, m_avail;
 	uint64_t gpu_proc_kib;
+	int gpu_proc_count;
 	int cpu_temp_mc;
+	int cpu_temp_labeled; /* 1 when cpu_temp_mc comes from zones known to be CPU sensors */
 	double self_cpu_pct;
 	int nproc;
-	struct view_proc procs[MAX_GPU_PROCS];
+	struct view_proc procs[MAX_VIEW_PROCS];
 };
 
 /* proc.c — pure parsers, exposed for tests */
@@ -164,12 +207,19 @@ int gpu_init(struct gpu *g);
 void gpu_read(struct gpu *g, struct gpu_sample *out, double now);
 void gpu_shutdown(struct gpu *g);
 
+/* procs.c */
+void procs_init(struct proc_table *t);
+int procs_scan(struct proc_table *t, double now);
+int procs_top(const struct proc_table *t, const struct gpu_sample *g, int key, struct view_proc *out,
+	      int max);
+
 /* sample.c */
 int sampler_init(struct sampler *sp, int want_gpu);
-void sampler_read(struct sampler *sp, struct sample *s);
+/* want_procs: scan /proc for the process panel (every PROC_PERIOD seconds) */
+void sampler_read(struct sampler *sp, struct sample *s, int want_procs);
 void sampler_close(struct sampler *sp);
 void mem_split(const struct meminfo *m, struct view *v);
-void compute_view(struct sampler *sp, const struct sample *prev, const struct sample *cur,
+void compute_view(struct sampler *sp, const struct sample *prev, const struct sample *cur, int sort,
 		  struct view *v);
 
 #endif

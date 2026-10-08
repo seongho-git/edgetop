@@ -15,8 +15,9 @@ check() { # label json max_rss_kib
 	rss=$(printf '%s' "$2" | sed -n 's/.*"rss_kib":\([0-9]*\).*/\1/p')
 	if [ "$rss" -le "$3" ]; then echo "ok   $1 rss ${rss} KiB (budget $3)"; else echo "FAIL $1 rss ${rss} KiB > $3"; fail=1; fi
 }
-check "--no-gpu" "$("$bin" --json --no-gpu -d 0.25)" 2048
-check "with gpu" "$("$bin" --json -d 0.25)" 21504
+check "--no-gpu --no-procs" "$("$bin" --json --no-gpu --no-procs -d 0.25)" 2048
+check "--no-gpu" "$("$bin" --json --no-gpu -d 0.25)" 3072
+check "with gpu" "$("$bin" --json -d 0.25)" 22528
 
 "$bin" --bench 2000 --no-gpu
 "$bin" --bench 2000

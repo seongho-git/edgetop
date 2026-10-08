@@ -7,8 +7,9 @@
 #include "util.h"
 
 #define LABEL_W 7
-#define PROC_ROWS_TUI 5
-#define PROC_ROWS_ONCE 10
+#define PROC_ROWS_ONCE 15
+#define PROC_ROWS_JSON 20
+#define PROC_MIN_ROWS 4 /* header + two processes + summary */
 
 static struct frame *F;
 
@@ -184,15 +185,15 @@ static void core_cell(int r, int c, int cpu, const struct view *v, const struct 
 
 static const int cell_w[D_COUNT] = {24, 16, 9};
 
-static int cores_per_row(int density)
+static int cores_per_row(int density, int cols)
 {
-	int per = (F->cols - LABEL_W) / cell_w[density];
+	int per = (cols - LABEL_W) / cell_w[density];
 	return per < 1 ? 1 : per;
 }
 
-static int core_rows(const struct topo *t, int density)
+static int core_rows(const struct topo *t, int density, int cols)
 {
-	int per = cores_per_row(density), rows = 0;
+	int per = cores_per_row(density, cols), rows = 0;
 
 	for (int g = 0; g < t->ngroups; g++)
 		rows += (t->groups[g].n + per - 1) / per;
@@ -203,7 +204,7 @@ static int panel_cores(int r, const struct view *v, const struct ui *ui)
 {
 	const struct topo *t = &v->sp->topo;
 	int w = cell_w[ui->density];
-	int per = cores_per_row(ui->density);
+	int per = cores_per_row(ui->density, F->cols);
 
 	for (int g = 0; g < t->ngroups; g++) {
 		const struct core_group *grp = &t->groups[g];
@@ -342,50 +343,113 @@ static int panel_mem(int r, const struct view *v, const struct ui *ui)
 	return r;
 }
 
+static const char *cluster_name(const struct topo *t, int kind)
+{
+	/* fastest cluster first in topo, so P-cores map to group 0 when two types exist */
+	if (t->ngroups >= 2)
+		return t->groups[kind == Z_PCORE ? 0 : 1].name;
+	return kind == Z_PCORE ? "pcore" : "ecore";
+}
+
 static int panel_temp(int r, const struct view *v)
 {
 	const struct sample *s = v->s;
-	int c = LABEL_W;
+	const struct thermal *th = &v->sp->th;
+	int c = LABEL_W, labeled = 0;
 
 	put(r, 1, C_TITLE, "Temp");
 	if (v->cpu_temp_mc != TEMP_NONE)
-		c = putf(r, c, temp_color(v->cpu_temp_mc), "cpu %dC  ", v->cpu_temp_mc / 1000);
+		c = putf(r, c, temp_color(v->cpu_temp_mc), "cpu %dC%s  ", v->cpu_temp_mc / 1000,
+			 v->cpu_temp_labeled ? "" : "?");
 	if (s->gpu.have & GF_TEMP)
 		c = putf(r, c, temp_color((int)s->gpu.temp_c * 1000), "gpu %uC  ", s->gpu.temp_c);
 	if (s->nvme_mc != TEMP_NONE)
 		c = putf(r, c, temp_color(s->nvme_mc), "nvme %dC  ", s->nvme_mc / 1000);
-	if (s->nzones) {
-		c = put(r, c + 1, C_DIM, "zones");
+	for (int i = 0; i < s->nzones; i++)
+		labeled |= th->zone[i].kind != Z_OTHER;
+	if (!s->nzones)
+		return r + 1;
+	r++;
+	c = LABEL_W;
+	if (!labeled) {
+		c = put(r, c, C_DIM, "zones");
 		for (int i = 0; i < s->nzones; i++)
 			if (s->zone_mc[i] != TEMP_NONE)
 				c = putf(r, c + 1, temp_color(s->zone_mc[i]), "%d", s->zone_mc[i] / 1000);
+		return r + 1;
 	}
+	/* one item per sensor kind; clustered sensors print as "name c0/c1" */
+	for (int kind = Z_SOC; kind <= Z_CPUISH; kind++) {
+		const char *name = NULL;
+		int first = 1;
+
+		for (int i = 0; i < s->nzones; i++) {
+			const struct zone_info *z = &th->zone[i];
+			int mc = s->zone_mc[i];
+
+			if (z->kind != kind || mc == TEMP_NONE)
+				continue;
+			if (first) {
+				name = kind == Z_PCORE || kind == Z_ECORE ? cluster_name(&v->sp->topo, kind)
+				       : kind == Z_GPU ? "gpu(acpi)" : z->label;
+				c = putf(r, c, C_DIM, "%s ", name);
+				first = 0;
+			} else {
+				c = put(r, c, C_DIM, "/");
+			}
+			c = putf(r, c, temp_color(mc), "%d", mc / 1000);
+		}
+		if (!first)
+			c = put(r, c, C_DEF, "  ");
+	}
+	for (int i = 0; i < s->nzones; i++)
+		if (th->zone[i].kind == Z_OTHER && s->zone_mc[i] != TEMP_NONE)
+			c = putf(r, c, temp_color(s->zone_mc[i]), "%s %d  ", th->zone[i].label,
+				 s->zone_mc[i] / 1000);
 	return r + 1;
 }
 
-static int panel_procs(int r, int max_rows, const struct view *v, const struct ui *ui)
+static const char *const sort_names[SORT_COUNT] = {"cpu", "gpu", "rss"};
+
+/* Header + rows + summary; takes whatever vertical room is left, down to nothing. */
+static int panel_procs(int r, int avail, const struct view *v, const struct ui *ui)
 {
 	const struct sample *s = v->s;
-	int limit = ui->once ? PROC_ROWS_ONCE : PROC_ROWS_TUI;
-	char mem[16], sum[16], resid[16];
+	int limit = avail - 2, c;
+	char rss[16], gpu[16], sum[16], resid[16];
 
-	if (!ui->show_procs || !(s->gpu.have & GF_PROCS) || max_rows < 3)
+	if (!ui->show_procs || !s->nprocs || avail < PROC_MIN_ROWS - 1)
 		return r;
-	if (limit > max_rows - 2)
-		limit = max_rows - 2;
-	put(r, 1, C_TITLE, "GPU procs");
-	putf(r, 11, C_BOLD, "%8s  %-10s %7s  %s", "PID", "USER", "MEM", "NAME");
+	if (ui->once && limit > PROC_ROWS_ONCE)
+		limit = PROC_ROWS_ONCE;
+	if (limit > v->nproc)
+		limit = v->nproc;
+	put(r, 1, C_TITLE, "Procs");
+	putf(r, LABEL_W, C_BOLD, "%7s  %-10s %6s %7s %7s  %s", "PID", "USER", "CPU%", "RSS",
+	     v->sp->gpu_on ? "GPU" : "", "NAME");
 	r++;
-	if (!v->nproc)
-		put(r++, 21, C_DIM, "(none)");
-	for (int i = 0; i < v->nproc && i < limit; i++, r++) {
+	for (int i = 0; i < limit; i++, r++) {
 		const struct view_proc *p = &v->procs[i];
-		fmt_kib(mem, sizeof mem, p->mem_bytes / 1024);
-		putf(r, 11, C_DEF, "%8u  %-10.10s %7s  %s", p->pid, p->user, mem, p->name);
+		fmt_kib(rss, sizeof rss, p->rss_kib);
+		if (p->gpu_bytes)
+			fmt_kib(gpu, sizeof gpu, p->gpu_bytes / 1024);
+		else
+			gpu[0] = '\0';
+		c = putf(r, LABEL_W, C_DEF, "%7u  %-10.10s ", p->pid, p->user);
+		c = putf(r, c, util_color(p->cpu_pct), "%5.1f%%", p->cpu_pct);
+		c = putf(r, c, C_DEF, " %7s ", rss);
+		c = putf(r, c, C_MAGENTA, "%7s", gpu);
+		putf(r, c, p->state == 'R' ? C_BOLD : C_DEF, "  %s", p->name);
 	}
-	fmt_kib(sum, sizeof sum, v->gpu_proc_kib);
-	fmt_kib(resid, sizeof resid, v->m_gpu);
-	putf(r, 11, C_DIM, "%d procs  nvml sum %s  meminfo resid %s", v->nproc, sum, resid);
+	if (!limit)
+		put(r++, LABEL_W, C_DIM, "(none)");
+	c = putf(r, LABEL_W, C_DIM, "%d procs, sort %s", s->nprocs, sort_names[ui->sort]);
+	if (v->sp->gpu_on) {
+		fmt_kib(sum, sizeof sum, v->gpu_proc_kib);
+		fmt_kib(resid, sizeof resid, v->m_gpu);
+		putf(r, c, C_DIM, "  |  %d on gpu: nvml %s, meminfo resid %s", v->gpu_proc_count, sum,
+		     resid);
+	}
 	return r + 1;
 }
 
@@ -395,14 +459,38 @@ static void panel_footer(int r, const struct view *v, const struct ui *ui)
 	int c;
 
 	fmt_kib(rss, sizeof rss, v->s->self_rss_kb);
-	if (F->cols >= 76)
-		c = putf(r, 1, C_DIM, "q quit  +/- %.2gs  p pause  g procs  c cells", ui->interval);
+	if (F->cols >= 80)
+		c = putf(r, 1, C_DIM, "q quit  +/- %.2gs  p pause  g procs  s sort  c cells", ui->interval);
 	else
-		c = putf(r, 1, C_DIM, "q +/- %.2gs p g c", ui->interval);
+		c = putf(r, 1, C_DIM, "q +/- %.2gs p g s c", ui->interval);
 	if (ui->paused)
 		c = put(r, c + 2, C_YELLOW, "PAUSED");
 	if (c + 20 <= F->cols)
 		putf(r, F->cols - 19, C_DIM, "self %5.2f%% %6s", v->self_cpu_pct, rss);
+}
+
+/* Rows taken by every panel except cores and procs: header, cpu, gpu, mem (+swap), temp, footer. */
+static int fixed_rows(const struct sampler *sp, const struct sample *s)
+{
+	return 1 + 1 + (sp->gpu_on ? 1 : 0) + 2 + (s && s->mem.swap_total ? 1 : 0) +
+	       (sp->th.nzones ? 2 : 1) + 1;
+}
+
+/*
+ * Core cells get denser (never sparser) than the user's choice when the fixed panels would not
+ * fit, or when that is what it takes to keep at least PROC_MIN_ROWS for the process list.
+ */
+static int effective_density(const struct sampler *sp, const struct sample *s, const struct ui *ui,
+			     int rows, int cols)
+{
+	int d = ui->density, fixed = fixed_rows(sp, s);
+	int want = ui->show_procs ? PROC_MIN_ROWS : 0;
+
+	while (d < D_COMPACT && rows - fixed - core_rows(&sp->topo, d, cols) < want)
+		d++;
+	while (d < D_COMPACT && fixed + core_rows(&sp->topo, d, cols) > rows)
+		d++;
+	return d;
 }
 
 void render(struct frame *f, const struct view *v, const struct ui *ui)
@@ -417,13 +505,9 @@ void render(struct frame *f, const struct view *v, const struct ui *ui)
 		return;
 	}
 	struct ui eff = *ui;
-	const struct sample *s = v->s;
-	int fixed = 1 + 1 + (v->sp->gpu_on ? 1 : 0) + 2 + (s->mem.swap_total ? 1 : 0) + 1 + 1;
 
-	/* switch to denser core cells when the other panels would be pushed off screen */
-	while (!ui->once && eff.density < D_COMPACT &&
-	       fixed + core_rows(&v->sp->topo, eff.density) > f->rows)
-		eff.density++;
+	if (!ui->once)
+		eff.density = effective_density(v->sp, v->s, ui, f->rows, f->cols);
 	ui = &eff;
 	r = panel_header(r, v, ui);
 	r = panel_cores(r, v, ui);
@@ -434,6 +518,17 @@ void render(struct frame *f, const struct view *v, const struct ui *ui)
 	r = panel_procs(r, (ui->once ? f->rows : f->rows - 1) - r, v, ui);
 	if (!ui->once)
 		panel_footer(f->rows - 1, v, ui);
+}
+
+int proc_rows_available(const struct sampler *sp, const struct sample *last, const struct ui *ui,
+			int rows, int cols)
+{
+	struct ui probe = *ui;
+	int density;
+
+	probe.show_procs = 1; /* ask what room there would be, even before the first scan */
+	density = effective_density(sp, last, &probe, rows, cols);
+	return rows - fixed_rows(sp, last) - core_rows(&sp->topo, density, cols);
 }
 
 static const char *const sgr[] = {
@@ -639,14 +734,9 @@ size_t render_json(const struct view *v, char *out, size_t cap)
 		else
 			jp(&b, ",\"clock_event_reasons\":null");
 		jp(&b, ",\"procs\":[");
-		for (int i = 0; i < v->nproc; i++) {
-			jp(&b, "%s{\"pid\":%u,\"user\":", i ? "," : "", v->procs[i].pid);
-			jstr(&b, v->procs[i].user);
-			jp(&b, ",\"mem_mib\":%llu,\"name\":",
-			   (unsigned long long)(v->procs[i].mem_bytes >> 20));
-			jstr(&b, v->procs[i].name);
-			jp(&b, "}");
-		}
+		for (int i = 0; i < g->nproc; i++)
+			jp(&b, "%s{\"pid\":%u,\"mem_mib\":%llu}", i ? "," : "", g->procs[i].pid,
+			   (unsigned long long)(g->procs[i].mem_bytes >> 20));
 		jp(&b, "]},");
 	}
 
@@ -672,14 +762,26 @@ size_t render_json(const struct view *v, char *out, size_t cap)
 	else
 		jp(&b, "\"gpu_c\":null,");
 	jtemp(&b, "nvme_c", s->nvme_mc);
-	jp(&b, ",\"zones_c\":[");
+	jp(&b, ",\"cpu_source\":\"%s\",\"zones\":[", v->cpu_temp_labeled ? "labeled" : "max_zone");
 	for (int i = 0; i < s->nzones; i++) {
+		jp(&b, "%s{\"label\":", i ? "," : "");
+		jstr(&b, v->sp->th.zone[i].label);
 		if (s->zone_mc[i] == TEMP_NONE)
-			jp(&b, "%snull", i ? "," : "");
+			jp(&b, ",\"c\":null}");
 		else
-			jp(&b, "%s%.1f", i ? "," : "", s->zone_mc[i] / 1000.0);
+			jp(&b, ",\"c\":%.1f}", s->zone_mc[i] / 1000.0);
 	}
-	jp(&b, "]},\"self\":{\"cpu_pct\":%.3f,\"rss_kib\":%llu}}\n", v->self_cpu_pct,
+	jp(&b, "]},\"procs\":[");
+	for (int i = 0; i < v->nproc && i < PROC_ROWS_JSON; i++) {
+		const struct view_proc *p = &v->procs[i];
+		jp(&b, "%s{\"pid\":%u,\"user\":", i ? "," : "", p->pid);
+		jstr(&b, p->user);
+		jp(&b, ",\"cpu_pct\":%.2f,\"rss_kib\":%llu,\"gpu_mib\":%llu,\"name\":", p->cpu_pct,
+		   (unsigned long long)p->rss_kib, (unsigned long long)(p->gpu_bytes >> 20));
+		jstr(&b, p->name);
+		jp(&b, "}");
+	}
+	jp(&b, "],\"self\":{\"cpu_pct\":%.3f,\"rss_kib\":%llu}}\n", v->self_cpu_pct,
 	   (unsigned long long)s->self_rss_kb);
 	return b.n;
 }

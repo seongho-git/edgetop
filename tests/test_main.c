@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "render.h"
 #include "sample.h"
@@ -154,7 +155,12 @@ static void test_render_fits(void)
 	b.zone_mc[0] = 63000;
 	b.nzones = 1;
 	b.nvme_mc = TEMP_NONE;
-	compute_view(&sp, &a, &b, &v);
+	sp.th.zone[0].kind = Z_OTHER;
+	compute_view(&sp, &a, &b, SORT_CPU, &v);
+	CHECK(v.cpu_temp_mc == 63000 && !v.cpu_temp_labeled);
+	sp.th.zone[0].kind = Z_PCORE;
+	compute_view(&sp, &a, &b, SORT_CPU, &v);
+	CHECK(v.cpu_temp_labeled);
 	CHECK(v.core_user[3] > 49.9 && v.core_user[3] < 50.1);
 
 	for (int d = 0; d < D_COUNT; d++) {
@@ -168,10 +174,39 @@ static void test_render_fits(void)
 	CHECK(render_json(&v, out, sizeof out) > 100 && out[0] == '{');
 }
 
+static void test_procs(void)
+{
+	static struct proc_table t;
+	static struct view_proc top[8];
+	struct gpu_sample g = {0};
+	int n, found = 0;
+
+	procs_init(&t);
+	CHECK(procs_scan(&t, 1.0) > 1);
+	CHECK(procs_scan(&t, 2.0) > 1);
+	n = procs_top(&t, &g, SORT_CPU, top, 8);
+	CHECK(n > 0 && n <= 8);
+	for (int i = 1; i < n; i++)
+		CHECK(top[i - 1].cpu_pct >= top[i].cpu_pct);
+	for (int i = 0; i < t.cur->n; i++)
+		if (t.cur->e[i].pid == (uint32_t)getpid()) {
+			found = 1;
+			CHECK(strcmp(t.cur->e[i].name, "run_tests") == 0);
+			CHECK(t.cur->e[i].user && t.cur->e[i].user[0] != '?');
+		}
+	CHECK(found);
+	g.nproc = 1;
+	g.procs[0].pid = (uint32_t)getpid();
+	g.procs[0].mem_bytes = 5 << 20;
+	n = procs_top(&t, &g, SORT_GPU, top, 8);
+	CHECK(n == 1 && top[0].pid == (uint32_t)getpid() && top[0].gpu_bytes == 5 << 20);
+}
+
 static const struct {
 	const char *name;
 	void (*fn)(void);
 } tests[] = {
+	{"procs", test_procs},
 	{"stat", test_stat},
 	{"stat_256", test_stat_256},
 	{"meminfo", test_meminfo},

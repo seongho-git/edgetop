@@ -5,11 +5,15 @@ CPPFLAGS += -D_POSIX_C_SOURCE=200809L
 STD     := -std=c11
 LDLIBS  := -ldl
 
+# system-wide for root, per-user otherwise; override with PREFIX=...
+PREFIX  ?= $(if $(filter 0,$(shell id -u)),/usr/local,$(HOME)/.local)
+BINDIR  := $(DESTDIR)$(PREFIX)/bin
+
 SRC     := $(wildcard src/*.c)
 OBJ     := $(SRC:src/%.c=build/%.o)
 LIBOBJ  := $(filter-out build/main.o,$(OBJ))
 
-.PHONY: all debug test test-one check check-footprint bench measure snap profile loadtest clean
+.PHONY: all install uninstall debug test test-one check check-footprint bench measure snap profile loadtest clean
 
 all: edgetop
 
@@ -21,6 +25,13 @@ build/%.o: src/%.c src/*.h | build
 
 build:
 	mkdir -p build
+
+install: edgetop
+	install -d $(BINDIR)
+	install -m 755 edgetop $(BINDIR)/edgetop
+
+uninstall:
+	rm -f $(BINDIR)/edgetop
 
 debug: clean
 	$(MAKE) CFLAGS="-O0 -g -fsanitize=address,undefined" LDLIBS="$(LDLIBS) -fsanitize=address,undefined"

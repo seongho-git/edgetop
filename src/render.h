@@ -24,6 +24,7 @@ enum density { D_FULL, D_BAR, D_COMPACT, D_COUNT };
 struct ui {
 	int density;
 	int show_procs;
+	int sort;
 	int paused;
 	int once;
 	int color;
@@ -32,6 +33,9 @@ struct ui {
 };
 
 void render(struct frame *f, const struct view *v, const struct ui *ui);
+/* Rows the process panel would get on a rows x cols screen; < 3 means it is hidden. */
+int proc_rows_available(const struct sampler *sp, const struct sample *last, const struct ui *ui,
+			int rows, int cols);
 /* Encodes rows that differ from prev (all rows when full) into out; returns the byte count. */
 size_t frame_encode(struct frame *f, struct frame *prev, int full, const struct ui *ui, char *out,
 		    size_t cap);

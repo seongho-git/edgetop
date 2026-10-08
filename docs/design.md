@@ -80,14 +80,16 @@ Measured on the DGX Spark with `make measure` (pseudo-terminal, default 1 s inte
 
 | Item | Budget | Measured |
 |---|---|---|
-| CPU per 1 s tick, steady state, machine idle | < 1 ms (< 0.1 % of one core) | 0.36–0.78 ms (0.04–0.08 %); 0.44 ms pinned to an X925 core, 0.82 ms pinned to an A725 core |
-| CPU per 1 s tick, machine under load (GPU 88 %, 4 cores spinning) | < 2.5 ms (< 0.25 %) | 1.76 ms (0.18 %); every source is ≈ 3× slower, `/proc/stat` included, so the cause is the loaded machine, not NVML contention |
+| CPU per 1 s tick, idle, process list on (default) | < 3.5 ms (< 0.35 % of one core) | 2.8 ms (0.28 %); the 2 s `/proc` scan of ≈ 560 processes is three quarters of it |
+| CPU per 1 s tick, idle, `--no-procs` | < 1 ms (< 0.1 %) | 0.36–0.78 ms (0.04–0.08 %); 0.44 ms pinned to an X925 core, 0.82 ms pinned to an A725 core |
+| CPU per 1 s tick, under load (GPU 87 %, 4 cores spinning), process list on | < 10 ms (< 1 %) | 8.7 ms (0.87 %); 1.76 ms (0.18 %) without the process list. Every source is ≈ 3× slower on the loaded machine, `/proc/stat` included, so the cause is not NVML contention |
 | Wakeups per second | ≈ 1 | 1.3 (incl. startup/exit); timer slack raised to 5 ms so the kernel can merge the wakeup with other timers |
 | Interference with a pinned CPU benchmark | none measurable | 36608 vs 36608 loop iterations in 8 s, with and without edgetop |
 | Interference with GPU idle power / utilization | none measurable | 11.46 W vs 11.48 W, 0 % vs 0 % over 20 nvidia-smi samples |
 | CPU per tick, hot loop (`--bench`) | < 100 µs | 53 µs without GPU, 56 µs with GPU (render ≈ 6 µs) |
-| Own RSS, `--no-gpu` | < 2 MB | 1.3–1.5 MB |
-| Own RSS, with NVML | < 21 MB (≈ 15 MB is NVML's, fixed) | 20.2–20.4 MB |
+| Own RSS, `--no-gpu --no-procs` | < 2 MB | 1.3–1.5 MB |
+| Own RSS, `--no-gpu` | < 3 MB | 1.7 MB (the process lists add ≈ 0.4 MB once scanned; the static table is 1.4 MB but only touched pages count) |
+| Own RSS, with NVML and the process list | < 22 MB (≈ 15 MB is NVML's, fixed) | 20.5–21.3 MB |
 | Output to the terminal | — | ≈ 1.8–2.3 KB/s (only changed rows) |
 | Heap allocations in the loop | 0 | 0 (all buffers static) |
 | GPU work | none | NVML queries are driver ioctls; no CUDA context is created |
@@ -114,7 +116,8 @@ Cadences (all others are read every tick):
 
 | Source | Period | Why |
 |---|---|---|
-| thermal zones | 2 s | 7 ACPI `_TMP` evaluations, ≈ 150 µs cold |
+| thermal zones | every tick | 7 ACPI `_TMP` evaluations, ≈ 150 µs cold; read every tick on purpose, temperature accuracy was requested over this cost |
+| `/proc` scan for the process list | 2 s | ≈ 4 ms per scan for 560 processes (≈ 12 ms under load); skipped when the panel is off (`--no-procs`, `g`) or has no rows |
 | GPU process list + clock-event reasons | 3 s | two process-list calls ≈ 770 µs cold |
 | NVMe temperature | 10 s | NVMe admin command, ≈ 700 µs per read |
 | `scaling_cur_freq` fallback | 5 s | only when `cpuinfo_avg_freq` is missing |
@@ -135,8 +138,8 @@ frame; slow sensors on a longer cadence.
 | CPU memory usage | `/proc/meminfo` | used / available / cached / buffers; see decomposition below |
 | GPU utilization | NVML `GetUtilizationRates.gpu` | % of time a kernel was running over the last sample window |
 | GPU memory usage | `/proc/meminfo` residual + NVML process sum | no FB counters on unified memory (survey §GPU memory) |
-| CPU temperature | `thermal_zone0..6` | 6 µs per zone; show max as "CPU", all zones in a compact row; zones are unlabeled |
-| GPU temperature | NVML `GetTemperature` | authoritative |
+| CPU temperature | `thermal_zone0..6`, classified by ACPI path | the firmware names them `TSOC`, `TS<cluster>E/P`, `TGPU`, `TUNC`; "cpu" = hottest SoC/core zone (direct on-die sensors), second row lists `soc`, `X925 c0/c1`, `A725 c0/c1`, `gpu(acpi)`, `uncore`. Mapping verified by loading each cluster separately (survey §Thermal). Machines without names fall back to the hottest zone, marked `?` |
+| GPU temperature | NVML `GetTemperature` | the GPU's own die sensor; the ACPI `TGPU` zone runs 2–5 °C apart and is shown as `gpu(acpi)` |
 
 ### Should
 
@@ -149,7 +152,8 @@ frame; slow sensors on a longer cadence.
 | GPU SM clock, P-state | NVML `GetClockInfo(SM)`, `GetPerformanceState` | |
 | GPU power (W) | NVML `GetPowerUsage` | average; no limit available on GB10 |
 | GPU memory-controller busy % | NVML `GetUtilizationRates.memory` | label it "membw", not "mem" |
-| GPU process list | NVML compute + graphics `Get*RunningProcesses_v3`, merged by pid; name from `/proc/PID/cmdline` (keeps `setproctitle` names), user from the owner of `/proc/PID` | cached per pid; refreshed every 3 s |
+| Process list (all processes) | `/proc/PID/stat` for every pid every 2 s; cpu% from utime+stime deltas (percent of one core, htop semantics); name from `/proc/PID/cmdline` once per new pid (keeps `setproctitle` names), user from the owner of `/proc/PID`; GPU memory joined from NVML by pid | sorted by cpu, gpu memory, or rss (`s` key); top 64 kept, the screen shows what fits |
+| GPU process list | NVML compute + graphics `Get*RunningProcesses_v3`, merged by pid | refreshed every 3 s; feeds the GPU column and the nvml-sum cross-check |
 | NVMe temperature | `hwmon` with `name=nvme`, `temp1_input` | ≈ 700 µs per read (NVMe admin command): sample every 10 s, not every tick |
 
 ### Nice to have (later, off by default)
@@ -193,10 +197,11 @@ exit:     restore terminal (also from the signal handler via a single write()), 
 | Module | Responsibility | Key decisions |
 |---|---|---|
 | `main.c` | args, tick loop, signals | `poll()` on stdin until the next deadline (rounded up to whole ms so it never spins), so key presses redraw immediately without extra wakeups |
-| `sample.h/.c` | `struct sample` (plain data, fixed arrays), sampler, view computation | max 256 cpus, 16 thermal zones, 64 GPU processes; pid → name/user cache |
+| `sample.h/.c` | `struct sample` (plain data, fixed arrays), sampler, view computation | max 256 cpus, 16 thermal zones, 64 GPU processes, 4096 processes per scan; the process table is static storage referenced by pointer so its pages stay non-resident until the first scan |
 | `proc.c` | `/proc/stat`, `/proc/meminfo`, `/proc/loadavg`, `/proc/pressure/*` | hand-written scanners, no `sscanf`; pure functions over a buffer so tests feed fixtures |
 | `cpufreq.c` | policy discovery, `cpuinfo_avg_freq`, MIDR cluster map | `EAGAIN` → `freq_khz = 0`, rendered as `idle`; falls back to `scaling_cur_freq` every 5 s only if `cpuinfo_avg_freq` is absent |
-| `thermal.c` | `thermal_zone*/temp`, hwmon `nvme` | zones every 2 s, nvme every 10 s, last values carried between reads |
+| `thermal.c` | `thermal_zone*/temp` with ACPI-path classification, hwmon `nvme` | zones every tick, nvme every 10 s with the last value carried |
+| `procs.c` | `/proc` scan, `/proc/PID/stat` parser, pid merge, top-N | fields counted from the last `)` (comm may contain spaces); tpgid and nice are signed; two 4096-entry lists swapped each scan, merged by pid for deltas; identity (name, uid) read once per new pid |
 | `nvml.c` | `dlopen`, symbol table, device 0 queries, process list | own ABI declarations (no `nvml.h` needed); `NOT_SUPPORTED` disables the field for the run so the UI hides it rather than printing 0 |
 | `render.c` | TUI frame, row diffing, `--once` text, `--json` | one `char frame[rows][cols]` plus a parallel color byte grid; bars drawn with `|` in color, distinct ASCII glyphs per segment without color, `--unicode` for 1/8-step block glyphs |
 | `term.c` | termios raw mode, alt screen, size, restore | restore sequence pre-built in a static buffer so the signal handler only calls `write()` |
@@ -222,51 +227,58 @@ ones below move up.
 | **CPU total** | 1 | aggregate busy % bar with user/system/iowait split by color, PSI `cpu some avg10`, core count |
 | **GPU** | 1–2 | `GB10 [bar util%]`, `membw %`, `SM MHz`, `W`, `P-state`, `°C`. Second row only if a slowdown reason (sw-power-cap, hw-slowdown, sw/hw-thermal, hw-power-brake) is active. Hidden with `--no-gpu` or no driver |
 | **Memory** | 2 | row 1: stacked bar `apps|gpu|kernel|cache|free` over `MemTotal`, with `used/total`. row 2: the five numbers, plus `avail` and PSI `memory some avg10`. Swap row appears only if `SwapTotal > 0` |
-| **Temperature** | 1 | `cpu <max zone>`, `gpu <NVML>`, `nvme <composite, 10 s>`, then all zone values compactly. Labels from hwmon when present |
-| **GPU processes** | up to 5 in the TUI, 10 in `--once` (toggle `g`) | `PID USER MEM NAME` sorted by GPU memory; then a line with the process count, the NVML sum, and the meminfo residual as the cross-check |
+| **Temperature** | 2 (1 without zones) | row 1: `cpu` (hottest CPU sensor, `?` when only an unlabeled max is available), `gpu` (NVML), `nvme`. row 2: every zone by name, clustered sensors as `X925 c0/c1`, `A725 c0/c1`, plus `gpu(acpi)` and `uncore`; unlabeled machines get the old `zones 63 49 …` row |
+| **Procs** | whatever is left, at least 4 (header + 2 + summary) | `PID USER CPU% RSS GPU NAME`, sorted by the `s` key (cpu, gpu memory, rss); running processes in bold; summary line with the process count, the sort key, the GPU process count, the NVML sum and the meminfo residual. `--once` shows up to 15 rows, `--json` 20 |
 | **Footer** | 1 | keys, current interval, and edgetop's own cost: `self 0.01% 1.1M` from `/proc/self/schedstat` (ns-exact) and `statm` so the budget is always visible |
 
 Color: 16-color ANSI only. Thresholds: utilization green < 50 %, yellow < 80 %, red ≥ 80 %; temperature
 green < 70 °C, yellow < 85 °C, red ≥ 85 °C. `NO_COLOR` or `--no-color` disables. No background colors,
 so it reads on light and dark terminals.
 
-Keys: `q` quit, `+`/`-` interval ×2 / ÷2 (0.25–10 s), `p` pause, `g` toggle process panel, `c` cycle
-core cell density (bar+MHz / bar only / compact).
+Keys: `q` quit, `+`/`-` interval ×2 / ÷2 (0.25–10 s), `p` pause, `g` toggle process panel, `s` cycle the
+sort key, `c` cycle core cell density (bar+MHz / bar only / compact).
+
+Vertical resizing: the process list is the flexible element and shrinks first. When fewer than four rows
+would remain for it, core cells step to the next denser form (bar, then compact) before the list is
+dropped; the fixed panels never move. Measured on 80 columns: 30 rows → 12 processes, 24 → 6, 22 → 4,
+20 → 2, 18 → bar cells with 2, 16 → compact cells with 3, 12 → compact with 2. When the panel has no room
+the `/proc` scan is skipped, so a short window costs nothing extra.
 
 `--json` emits one object (sizes in KiB, absent metrics `null`):
-`{ts, uptime_s, load:[1,5,15], tasks:{running,total}, cpu:{total_pct, user_pct, system_pct, iowait_pct, psi_some10, cores:[{id, cluster, pct, mhz}]}, gpu:{name, util_pct, membw_pct, sm_mhz, power_w, temp_c, pstate, clock_event_reasons, procs:[{pid, user, mem_mib, name}]}, mem:{total_kib, used_kib, apps_kib, gpu_kib, kernel_kib, cache_kib, free_kib, avail_kib, gpu_procs_kib, swap_total_kib, swap_free_kib, psi_some10}, temp:{cpu_c, gpu_c, nvme_c, zones_c:[...]}, self:{cpu_pct, rss_kib}}`.
+`{ts, uptime_s, load:[1,5,15], tasks:{running,total}, cpu:{total_pct, user_pct, system_pct, iowait_pct, psi_some10, cores:[{id, cluster, pct, mhz}]}, gpu:{name, util_pct, membw_pct, sm_mhz, power_w, temp_c, pstate, clock_event_reasons, procs:[{pid, mem_mib}]}, mem:{total_kib, used_kib, apps_kib, gpu_kib, kernel_kib, cache_kib, free_kib, avail_kib, gpu_procs_kib, swap_total_kib, swap_free_kib, psi_some10}, temp:{cpu_c, gpu_c, nvme_c, cpu_source:"labeled"|"max_zone", zones:[{label, c}]}, procs:[{pid, user, cpu_pct, rss_kib, gpu_mib, name}] (top 20 by the sort key), self:{cpu_pct, rss_kib}}`.
 `gpu` is `null` with `--no-gpu` or without a driver.
 
 ## Layout (80×24, captured from the running TUI)
 
 ```
- edgetop  eos  up 63d 13:47  load 1.10 1.10 1.03  2/1580               16:05:05
- X925    5[           0% idle]   6[           0% 3663]   7[           2% idle]
-         8[           0% 3896]   9[           0% idle]  15[           0% 3857]
-        16[           0% 3713]  17[           0% 3706]  18[           0% 3900]
-        19[|||||||||100% 4000]
- A725    0[           0% 2610]   1[           0% 2177]   2[           0% 2637]
-         3[           0% 2698]   4[           0% idle]  10[           1% 2287]
-        11[           0% idle]  12[           0% 2293]  13[           0% 2379]
+ edgetop  eos  up 64d 00:37  load 0.20 0.68 0.75  2/1481               02:55:49
+ X925    5[           0% 3519]   6[           1% 3728]   7[           0% idle]
+         8[           0% idle]   9[           0% 3896]  15[           2% 3585]
+        16[           0% 3791]  17[           0% 3733]  18[           0% 3915]
+        19[           0% 3824]
+ A725    0[           0% 2182]   1[           0% idle]   2[           0% 2404]
+         3[           0% idle]   4[           2% 2596]  10[           0% 2522]
+        11[           0% 2617]  12[           0% idle]  13[           3% 2569]
         14[           0% idle]
- CPU   [||                                            5.3%]  psi 0.00  20 cores
- GPU   GB10 [                           0%]  membw  0%  2405MHz  11.4W  P0  48C
- Mem   [|||||||||||||||||||||||||||||||||||||||||||||||||||||    108.3G/121.7G]
-       apps 7.5G  gpu 98.8G  kernel 2.0G  cache 5.2G  avail 12.5G  psi 0.00
- Temp  cpu 63C  gpu 48C  nvme 43C   zones 63 48 50 49 63 50 52
- GPU procs      PID  USER           MEM  NAME
-             253274  root         95.4G  sglang::scheduler
-               9650  corelab       525M  firefox
-             252809  root          170M  python3
-               3263  corelab        55M  Xorg
-               3441  corelab        49M  gnome-shell
-           6 procs  nvml sum 96.2G  meminfo resid 98.8G
-
- q quit  +/- 1s  p pause  g procs  c cells                   self  0.04%    20M
+ CPU   [                                              0.5%]  psi 0.0%  20 cores
+ GPU   GB10 [                             0%]  membw  0%  208MHz  4.6W  P8  43C
+ Mem   [|||||                                                      6.1G/121.7G]
+       apps 2.5G  gpu 2.9G  kernel 736M  cache 3.8G  avail 114.1G  psi 0.0%
+ Temp  cpu 45C  gpu 43C  nvme 41C
+       soc 45  X925 44/44  A725 43/43  gpu(acpi) 45  uncore 43
+ Procs     PID  USER         CPU%     RSS     GPU  NAME
+        320844  seongho      4.5%    440M          claude
+          1457  avahi        2.3%      7M          avahi-daemon
+        541573  seongho      0.5%    331M          claude
+        321363  seongho      0.5%    188M          claude
+          3263  corelab      0.5%     41M     55M  Xorg
+       561 procs, sort cpu  |  4 on gpu: nvml 662M, meminfo resid 2.9G
+ q quit  +/- 1s  p pause  g procs  s sort  c cells           self  0.05%    20M
 ```
 
 The product name (`NVIDIA_DGX_Spark`) is shown when the header has room for it next to the clock.
-Memory is in GiB (the survey's 127.6 GB is MemTotal in decimal kB).
+Memory is in GiB (the survey's 127.6 GB is MemTotal in decimal kB). This capture was taken after the
+resident sglang server had been stopped, hence the small GPU share and the P8 idle state.
 
 ## Measured sampling costs (DGX Spark, 2026-10-07)
 
@@ -301,6 +313,17 @@ CPU total off by 0.26 pp, memory by 0.01 GiB, GPU utilization 89 vs 89 %, temper
 43.13 vs 43.13 W, all three GPU processes' memory exact. The screen showed the four spinning cores at 100 %,
 GPU at 87 %, apps memory up by 4 GiB, and GPU temperature rising from 48 to 58 °C.
 
+Thermal zone identity was verified by loading one cluster at a time and sampling every zone before, during,
+and after (zone names from `/sys/class/thermal/thermal_zoneN/device/path`):
+
+```sh
+for cpu in 10 11 12 13 14; do taskset -c $cpu sh -c 'end=$(( $(date +%s) + 25 )); while [ $(date +%s) -lt $end ]; do :; done' & done
+sleep 22; for i in 0 1 2 3 4 5 6; do printf "%s=%s " $(basename $(cat /sys/class/thermal/thermal_zone$i/device/path)) $(( $(cat /sys/class/thermal/thermal_zone$i/temp) / 1000 )); done; echo; wait
+```
+
+Only `TS1E` (and `TSOC`, which follows the maximum) moved for cpus 10–14; only `TS0P` moved substantially
+for cpus 5–9 (44 → 58 °C). Both runs are tabulated in `device-survey.md` §Thermal.
+
 ## Source layout
 
 ```
@@ -309,7 +332,8 @@ src/
   sample.h/.c   data structures, sampler, delta and memory computation, pid cache
   proc.c        /proc/stat, /proc/meminfo, /proc/loadavg, PSI parsers
   cpufreq.c     topology (MIDR clusters), cpuinfo_avg_freq
-  thermal.c     thermal zones, NVMe hwmon
+  thermal.c     thermal zones (ACPI-path classification), NVMe hwmon
+  procs.c       /proc scan, /proc/PID/stat parser, cpu% deltas, top-N
   nvml.c        dlopen'd NVML wrapper
   render.h/.c   frame grid, panels, row diffing, text and JSON output
   term.h/.c     raw mode, alternate screen, async-signal-safe restore

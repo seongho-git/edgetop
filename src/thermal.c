@@ -6,7 +6,6 @@
 #include "sample.h"
 #include "util.h"
 
-#define ZONE_PERIOD 2.0  /* ACPI _TMP evaluation, ~7 us per zone */
 #define NVME_PERIOD 10.0 /* each read issues an NVMe admin command (~0.7 ms) */
 
 static int read_mc(int fd)
@@ -24,6 +23,64 @@ static int cmp_int(const void *a, const void *b)
 	return *(const int *)a - *(const int *)b;
 }
 
+static int has(const char *s, const char *word)
+{
+	return strstr(s, word) != NULL;
+}
+
+/*
+ * Names the zone from its ACPI path when the firmware uses the DGX Spark scheme
+ * (TSOC, TS<cluster>E/P, TGPU, TUNC); otherwise from the zone type.
+ */
+static void classify(int id, struct zone_info *z)
+{
+	char path[128], buf[128], *nl, *name;
+
+	z->kind = Z_OTHER;
+	z->cluster = -1;
+	snprintf(path, sizeof path, "/sys/class/thermal/thermal_zone%d/device/path", id);
+	if (read_path(path, buf, sizeof buf) > 0) {
+		if ((nl = strchr(buf, '\n')))
+			*nl = '\0';
+		name = strrchr(buf, '.');
+		name = name ? name + 1 : buf;
+		if (!strcmp(name, "TSOC")) {
+			z->kind = Z_SOC;
+			strcpy(z->label, "soc");
+			return;
+		}
+		if (!strcmp(name, "TGPU")) {
+			z->kind = Z_GPU;
+			strcpy(z->label, "gpu");
+			return;
+		}
+		if (!strcmp(name, "TUNC")) {
+			z->kind = Z_UNCORE;
+			strcpy(z->label, "uncore");
+			return;
+		}
+		if (name[0] == 'T' && name[1] == 'S' && name[2] >= '0' && name[2] <= '9' &&
+		    (name[3] == 'E' || name[3] == 'P') && !name[4]) {
+			z->kind = name[3] == 'P' ? Z_PCORE : Z_ECORE;
+			z->cluster = name[2] - '0';
+			snprintf(z->label, sizeof z->label, "c%d%c", z->cluster, name[3] == 'P' ? 'p' : 'e');
+			return;
+		}
+	}
+	snprintf(path, sizeof path, "/sys/class/thermal/thermal_zone%d/type", id);
+	if (read_path(path, buf, sizeof buf) > 0) {
+		if ((nl = strchr(buf, '\n')))
+			*nl = '\0';
+		snprintf(z->label, sizeof z->label, "%.11s", buf);
+		if (has(buf, "gpu"))
+			z->kind = Z_GPU;
+		else if (has(buf, "cpu") || has(buf, "pkg") || has(buf, "soc") || has(buf, "core"))
+			z->kind = Z_CPUISH;
+	} else {
+		snprintf(z->label, sizeof z->label, "z%d", id);
+	}
+}
+
 void thermal_init(struct thermal *th)
 {
 	DIR *d;
@@ -35,7 +92,6 @@ void thermal_init(struct thermal *th)
 	th->nvme_fd = -1;
 	th->nvme_last = TEMP_NONE;
 	th->nvme_t = -1e9;
-	th->zone_t = -1e9;
 
 	if ((d = opendir("/sys/class/thermal"))) {
 		while ((e = readdir(d)) && n < MAX_ZONES)
@@ -47,8 +103,10 @@ void thermal_init(struct thermal *th)
 	for (int i = 0; i < n; i++) {
 		snprintf(path, sizeof path, "/sys/class/thermal/thermal_zone%d/temp", ids[i]);
 		int fd = open_ro(path);
-		if (fd >= 0)
-			th->zone_fd[th->nzones++] = fd;
+		if (fd < 0)
+			continue;
+		classify(ids[i], &th->zone[th->nzones]);
+		th->zone_fd[th->nzones++] = fd;
 	}
 
 	if ((d = opendir("/sys/class/hwmon"))) {
@@ -68,12 +126,8 @@ void thermal_init(struct thermal *th)
 void thermal_read(struct thermal *th, struct sample *s)
 {
 	s->nzones = th->nzones;
-	if (s->t - th->zone_t >= ZONE_PERIOD) {
-		for (int i = 0; i < th->nzones; i++)
-			th->zone_last[i] = read_mc(th->zone_fd[i]);
-		th->zone_t = s->t;
-	}
-	memcpy(s->zone_mc, th->zone_last, sizeof th->zone_last);
+	for (int i = 0; i < th->nzones; i++)
+		s->zone_mc[i] = read_mc(th->zone_fd[i]);
 	if (th->nvme_fd >= 0 && s->t - th->nvme_t >= NVME_PERIOD) {
 		th->nvme_last = read_mc(th->nvme_fd);
 		th->nvme_t = s->t;
