@@ -63,6 +63,16 @@ static void identify(struct proc_table *t, struct proc_entry *e, const char *com
 
 	snprintf(path, sizeof path, "/proc/%u/cmdline", e->pid);
 	n = read_path(path, buf, sizeof buf);
+	e->cmd[0] = '\0';
+	if (n > 0 && buf[0]) {
+		/* argv is NUL-separated; keep a space-joined copy for the COMMAND column */
+		size_t k = 0;
+		for (ssize_t i = 0; i < n && k + 1 < sizeof e->cmd; i++)
+			e->cmd[k++] = buf[i] ? buf[i] : ' ';
+		while (k && e->cmd[k - 1] == ' ')
+			k--;
+		e->cmd[k] = '\0';
+	}
 	if (n > 0 && buf[0]) {
 		/* argv[0] keeps names set via setproctitle; comm is cut at 15 chars */
 		char *base, *end = strpbrk(buf, "\n ");
@@ -172,6 +182,7 @@ int procs_scan(struct proc_table *t, double now)
 		if (j < prev->n && prev->e[j].pid == e->pid && prev->n) {
 			const struct proc_entry *o = &prev->e[j];
 			memcpy(e->name, o->name, sizeof e->name);
+			memcpy(e->cmd, o->cmd, sizeof e->cmd);
 			e->uid = o->uid;
 			e->user = o->user;
 			e->cpu_pct = window > 0 && e->ticks >= o->ticks
@@ -189,18 +200,20 @@ int procs_scan(struct proc_table *t, double now)
 	return cur->n;
 }
 
-static uint64_t gpu_mem_of(const struct gpu_sample *g, uint32_t pid)
+static const struct gpu_proc *gpu_of(const struct gpu_sample *g, uint32_t pid)
 {
 	for (int i = 0; i < g->nproc; i++)
 		if (g->procs[i].pid == pid)
-			return g->procs[i].mem_bytes;
-	return 0;
+			return &g->procs[i];
+	return NULL;
 }
 
 static int better(const struct view_proc *a, const struct view_proc *b, int key)
 {
 	switch (key) {
 	case SORT_GPU:
+		if (a->gpu_pct != b->gpu_pct)
+			return a->gpu_pct > b->gpu_pct;
 		if (a->gpu_bytes != b->gpu_bytes)
 			return a->gpu_bytes > b->gpu_bytes;
 		break;
@@ -226,14 +239,15 @@ int procs_top(const struct proc_table *t, const struct gpu_sample *g, int key, s
 
 	for (int i = 0; i < l->n; i++) {
 		const struct proc_entry *e = &l->e[i];
+		const struct gpu_proc *gp = gpu_of(g, e->pid);
 		struct view_proc vp = {
-			.pid = e->pid, .user = e->user, .name = e->name, .cpu_pct = e->cpu_pct,
-			.rss_kib = e->rss_pages * (uint64_t)t->page_kib,
-			.gpu_bytes = gpu_mem_of(g, e->pid), .state = e->state,
+			.pid = e->pid, .user = e->user, .name = e->name, .cmd = e->cmd, .cpu_pct = e->cpu_pct,
+			.gpu_pct = gp ? gp->sm_pct : 0, .rss_kib = e->rss_pages * (uint64_t)t->page_kib,
+			.gpu_bytes = gp ? gp->mem_bytes : 0, .state = e->state,
 		};
 		int j;
 
-		if (key == SORT_GPU && !vp.gpu_bytes)
+		if (key == SORT_GPU && !gp)
 			continue;
 		if (n < max)
 			j = n++;

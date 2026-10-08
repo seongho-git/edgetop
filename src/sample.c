@@ -81,7 +81,7 @@ void sampler_read(struct sampler *sp, struct sample *s, int want_procs)
 	topo_read(&sp->topo, s);
 	thermal_read(&sp->th, s);
 	if (sp->gpu_on)
-		gpu_read(&sp->gpu, &s->gpu, s->t);
+		gpu_read(&sp->gpu, &s->gpu, s->t, want_procs);
 	else
 		s->gpu.have = 0;
 	if (want_procs && s->t - sp->procs_t >= PROC_PERIOD) {
@@ -150,6 +150,21 @@ void mem_split(const struct meminfo *m, struct view *v)
 	v->m_apps = apps < used ? apps : used;
 	v->m_kernel = kernel < used - v->m_apps ? kernel : used - v->m_apps;
 	v->m_gpu = used - v->m_apps - v->m_kernel;
+}
+
+void history_push(struct history *h, const struct view *v)
+{
+	const struct sample *s = v->s;
+
+	for (int c = 0; c < s->ncpu && c < MAX_CPUS; c++) {
+		double p = v->core_user[c] + v->core_sys[c];
+		h->core[c][h->head] = (uint8_t)(p > 100 ? 100 : p < 0 ? 0 : p + 0.5);
+	}
+	h->gpu[h->head] = (uint8_t)((s->gpu.have & GF_UTIL) ? (s->gpu.util > 100 ? 100 : s->gpu.util) : 0);
+	h->mem[h->head] = (uint8_t)(v->m_total ? (100 * v->m_used + v->m_total / 2) / v->m_total : 0);
+	h->head = (h->head + 1) % HIST_LEN;
+	if (h->len < HIST_LEN)
+		h->len++;
 }
 
 void compute_view(struct sampler *sp, const struct sample *prev, const struct sample *cur, int sort,

@@ -80,15 +80,17 @@ Measured on the DGX Spark with `make measure` (pseudo-terminal, default 1 s inte
 
 | Item | Budget | Measured |
 |---|---|---|
-| CPU per 1 s tick, idle, process list on (default) | < 3.5 ms (< 0.35 % of one core) | 2.8 ms (0.28 %); the 2 s `/proc` scan of ≈ 560 processes is three quarters of it |
+| CPU per 1 s tick, idle, process list on (default), 80x24 | < 3.5 ms (< 0.35 % of one core) | 2.1–2.9 ms (0.21–0.29 %) across runs; the 2 s `/proc` scan of ≈ 560 processes is most of it |
 | CPU per 1 s tick, idle, `--no-procs` | < 1 ms (< 0.1 %) | 0.36–0.78 ms (0.04–0.08 %); 0.44 ms pinned to an X925 core, 0.82 ms pinned to an A725 core |
-| CPU per 1 s tick, under load (GPU 87 %, 4 cores spinning), process list on | < 10 ms (< 1 %) | 8.7 ms (0.87 %); 1.76 ms (0.18 %) without the process list. Every source is ≈ 3× slower on the loaded machine, `/proc/stat` included, so the cause is not NVML contention |
+| CPU per 1 s tick, idle, 160x50 with core boxes and the GPU box | < 4 ms | 2.1 ms (0.21 %); the larger frame adds rendering and ≈ 6.5 KB/s of output |
+| CPU per 1 s tick, under load (GPU 75–87 %, cores spinning), process list on | < 15 ms (< 1.5 %) | 8.7–12.8 ms (0.9–1.3 %), of which ≈ 3 ms is `GetProcessUtilization` and ≈ 1 ms the power-cap counter; 1.76 ms (0.18 %) without the process list. Every source is ≈ 3× slower on the loaded machine, `/proc/stat` included, so the cause is not NVML contention |
+| CPU per 1 s tick, idle, `--no-procs` | < 1 ms (< 0.1 %) | 0.36–0.78 ms (0.04–0.08 %); 0.44 ms pinned to an X925 core, 0.82 ms pinned to an A725 core |
 | Wakeups per second | ≈ 1 | 1.3 (incl. startup/exit); timer slack raised to 5 ms so the kernel can merge the wakeup with other timers |
 | Interference with a pinned CPU benchmark | none measurable | 36608 vs 36608 loop iterations in 8 s, with and without edgetop |
 | Interference with GPU idle power / utilization | none measurable | 11.46 W vs 11.48 W, 0 % vs 0 % over 20 nvidia-smi samples |
 | CPU per tick, hot loop (`--bench`) | < 100 µs | 53 µs without GPU, 56 µs with GPU (render ≈ 6 µs) |
 | Own RSS, `--no-gpu --no-procs` | < 2 MB | 1.3–1.5 MB |
-| Own RSS, `--no-gpu` | < 3 MB | 1.7 MB (the process lists add ≈ 0.4 MB once scanned; the static table is 1.4 MB but only touched pages count) |
+| Own RSS, `--no-gpu` | < 3 MB | 1.7–1.9 MB (the process lists add ≈ 0.4 MB once scanned; the static table is 1.4 MB but only touched pages count; history ring 130 KB) |
 | Own RSS, with NVML and the process list | < 22 MB (≈ 15 MB is NVML's, fixed) | 20.5–21.3 MB |
 | Output to the terminal | — | ≈ 1.8–2.3 KB/s (only changed rows) |
 | Heap allocations in the loop | 0 | 0 (all buffers static) |
@@ -118,7 +120,7 @@ Cadences (all others are read every tick):
 |---|---|---|
 | thermal zones | every tick | 7 ACPI `_TMP` evaluations, ≈ 150 µs cold; read every tick on purpose, temperature accuracy was requested over this cost |
 | `/proc` scan for the process list | 2 s | ≈ 4 ms per scan for 560 processes (≈ 12 ms under load); skipped when the panel is off (`--no-procs`, `g`) or has no rows |
-| GPU process list + clock-event reasons | 3 s | two process-list calls ≈ 770 µs cold |
+| GPU process list + per-process utilization | 3 s | two process-list calls ≈ 770 µs cold; `GetProcessUtilization` 6–11 ms while GPU processes exist. Clock-event reasons (≈ 6 µs cold) and instantaneous power (≈ 11 µs cold) are read every tick so the status row is live; the violation counter joins this cadence only while the GPU is busy |
 | NVMe temperature | 10 s | NVMe admin command, ≈ 700 µs per read |
 | `scaling_cur_freq` fallback | 5 s | only when `cpuinfo_avg_freq` is missing |
 
@@ -150,16 +152,20 @@ frame; slow sensors on a longer cadence.
 | Load average, task counts | `/proc/loadavg` | |
 | PSI cpu / memory | `/proc/pressure/*` | `some avg10`, highlights contention that util % hides |
 | GPU SM clock, P-state | NVML `GetClockInfo(SM)`, `GetPerformanceState` | |
-| GPU power (W) | NVML `GetPowerUsage` | average; no limit available on GB10 |
+| GPU power (W) | NVML field `POWER_INSTANT` (186) on the bar line (≈ 10 µs); `GetPowerUsage` average on the status line | no power limit is exposed on GB10 (all limit calls NOT_SUPPORTED), so `cap n/a`. `GetTotalEnergyConsumption` would give an exact window average but costs 2.4–2.7 ms per call and agreed with the driver average within 0.12 W, so it is not used |
+| GPU power-cap share | NVML `GetViolationStatus(POWER)` delta ÷ elapsed, on the 3 s cadence | 1–2 ms per call, and the counter also advances while the driver holds idle clocks down (≈ 50 % at P8), so it is sampled only while utilization > 0 |
+| GPU clock-event reasons | NVML `GetCurrentClocksEventReasons` every tick | "SW power cap" is flagged at idle too; it counts as throttling only while busy |
 | GPU memory-controller busy % | NVML `GetUtilizationRates.memory` | label it "membw", not "mem" |
-| Process list (all processes) | `/proc/PID/stat` for every pid every 2 s; cpu% from utime+stime deltas (percent of one core, htop semantics); name from `/proc/PID/cmdline` once per new pid (keeps `setproctitle` names), user from the owner of `/proc/PID`; GPU memory joined from NVML by pid | sorted by cpu, gpu memory, or rss (`s` key); top 64 kept, the screen shows what fits |
-| GPU process list | NVML compute + graphics `Get*RunningProcesses_v3`, merged by pid | refreshed every 3 s; feeds the GPU column and the nvml-sum cross-check |
+| Process list (all processes) | `/proc/PID/stat` for every pid every 2 s; cpu% from utime+stime deltas (percent of one core, htop semantics); name from `/proc/PID/cmdline` once per new pid (keeps `setproctitle` names), user from the owner of `/proc/PID`; GPU memory and GPU% joined from NVML by pid | sorted by cpu, gpu (utilization, then memory), or rss (`s` key); top 64 kept, the screen shows what fits |
+| GPU process list | NVML compute + graphics `Get*RunningProcesses_v3`, merged by pid | refreshed every 3 s; feeds the GPUMEM column and the nvml-sum cross-check |
+| Per-process GPU utilization | `nvmlDeviceGetProcessUtilization` with the last seen timestamp; SM% per pid, max over the returned samples | supported on GB10 (verified: 67–70 % for a kernel loop while the device showed 87 %); 6–11 ms per call even when idle, so it shares the 3 s cadence and is skipped unless the process panel is visible and device utilization is above 0 (no process can have SM time otherwise); NOT_FOUND means no GPU work since the last call and resets to 0 |
+| Utilization history | ring of 512 per-tick percentages per core, GPU compute, system memory used | drives the core box graphs (24 ticks) and the GPU box (one tick per column, up to the screen width) |
 | NVMe temperature | `hwmon` with `name=nvme`, `temp1_input` | ≈ 700 µs per read (NVMe admin command): sample every 10 s, not every tick |
 
 ### Nice to have (later, off by default)
 
 Disk throughput (`/proc/diskstats`), network throughput (`/sys/class/net/*/statistics`), per-core
-history sparklines, config file for panel order. (`NO_COLOR` / `--no-color` shipped in v0.1.0.)
+config file for panel order. (`NO_COLOR` / `--no-color` and history graphs shipped since.)
 
 ### Memory decomposition shown in the Mem bar
 
@@ -203,7 +209,7 @@ exit:     restore terminal (also from the signal handler via a single write()), 
 | `thermal.c` | `thermal_zone*/temp` with ACPI-path classification, hwmon `nvme` | zones every tick, nvme every 10 s with the last value carried |
 | `procs.c` | `/proc` scan, `/proc/PID/stat` parser, pid merge, top-N | fields counted from the last `)` (comm may contain spaces); tpgid and nice are signed; two 4096-entry lists swapped each scan, merged by pid for deltas; identity (name, uid) read once per new pid |
 | `nvml.c` | `dlopen`, symbol table, device 0 queries, process list | own ABI declarations (no `nvml.h` needed); `NOT_SUPPORTED` disables the field for the run so the UI hides it rather than printing 0 |
-| `render.c` | TUI frame, row diffing, `--once` text, `--json` | one `char frame[rows][cols]` plus a parallel color byte grid; bars drawn with `|` in color, distinct ASCII glyphs per segment without color, `--unicode` for 1/8-step block glyphs |
+| `render.c` | layout planner, TUI frame, core and GPU line graphs, row diffing, `--once` text, `--json` | one `char frame[rows][cols]` plus a parallel color byte grid; horizontal bars default to `|` as in htop/nvtop (one glyph per segment without color); `--bars line` gives ━ in half-cell steps with a dim ─ track, `--bars blocks` 1/8-step left blocks; graphs and box edges use box-drawing glyphs in unicode mode (braille was rejected as too dotted); frame cells are 16-bit for glyph-code headroom; GPU memory is magenta via 256-color index 164 (hue of 201 without its neon brightness) because palette magenta renders purple in most terminals |
 | `term.c` | termios raw mode, alt screen, size, restore | restore sequence pre-built in a static buffer so the signal handler only calls `write()` |
 
 Error policy: a missing file or unsupported NVML call hides that metric; it never aborts. The only fatal
@@ -223,12 +229,13 @@ ones below move up.
 | Panel | Rows | Content |
 |---|---|---|
 | **Header** | 1 | `edgetop`, hostname or DMI product, uptime, load 1/5/15, task counts (running/total from `/proc/loadavg`), clock |
-| **CPU cores** | ⌈cores ÷ per-row⌉ per cluster | one cell per core: `id[bar pct MHz]`. Cells grouped by cluster with a label (`X925`, `A725`; `CPU` on homogeneous machines), fastest cluster first. Cell width 24 → 3 per row at 80 cols, 5 at 140. Bar splits user (green) and system (red); the percentage is colored by threshold; MHz from `cpuinfo_avg_freq`, `idle` when EAGAIN |
-| **CPU total** | 1 | aggregate busy % bar with user/system/iowait split by color, PSI `cpu some avg10`, core count |
-| **GPU** | 1–2 | `GB10 [bar util%]`, `membw %`, `SM MHz`, `W`, `P-state`, `°C`. Second row only if a slowdown reason (sw-power-cap, hw-slowdown, sw/hw-thermal, hw-power-brake) is active. Hidden with `--no-gpu` or no driver |
+| **CPU cores** | ⌈cores ÷ per-row⌉ per cluster (×4 for boxes) | one cell per core: `id[bar pct MHz]`. Cells grouped by cluster with a label (`X925`, `A725`; `CPU` on homogeneous machines), fastest cluster first. Cell width 24 → 3 per row at 80 cols, 5 at 140; the box form is a 26-wide, 6- or 4-row box with the id, %, MHz on its top edge and a 24-tick line graph inside (nvtop's algorithm, one series) whose whole line is colored by the current load with the usual 50/80 % thresholds. Bar splits user (green) and system (red); the percentage is colored by threshold; MHz from `cpuinfo_avg_freq`, `idle` when EAGAIN |
+| **CPU total** | 1 | aggregate busy % bar with user/system/iowait split by color, PSI `cpu some avg10`, core count; at 110+ columns also the usr/sys/io percentages as text |
+| **GPU** | 2 | row 1: `GB10 [bar util%]`, `membw %`, `SM MHz`, instantaneous `W`, `P-state`, `°C`. row 2 (always present): `throttle:` `idle` (GPU not busy) / `none` (busy at full clocks) / `sw-power-cap` (yellow, busy) / red slowdown reasons (hw-slowdown, sw-thermal, hw-thermal, hw-power-brake); `power: avg N W` (the driver's averaged reading); `cap n/a` (GB10 exposes no limit); `capped N%` share of the last 3 s spent power-capped, sampled and shown only while busy. Hidden with `--no-gpu` or no driver |
 | **Memory** | 2 | row 1: stacked bar `apps|gpu|kernel|cache|free` over `MemTotal`, with `used/total`. row 2: the five numbers, plus `avail` and PSI `memory some avg10`. Swap row appears only if `SwapTotal > 0` |
 | **Temperature** | 2 (1 without zones) | row 1: `cpu` (hottest CPU sensor, `?` when only an unlabeled max is available), `gpu` (NVML), `nvme`. row 2: every zone by name, clustered sensors as `X925 c0/c1`, `A725 c0/c1`, plus `gpu(acpi)` and `uncore`; unlabeled machines get the old `zones 63 49 …` row |
-| **Procs** | whatever is left, at least 4 (header + 2 + summary) | `PID USER CPU% RSS GPU NAME`, sorted by the `s` key (cpu, gpu memory, rss); running processes in bold; summary line with the process count, the sort key, the GPU process count, the NVML sum and the meminfo residual. `--once` shows up to 15 rows, `--json` 20 |
+| **GPU box** | 16, 12 or 8 (only when the screen is large) | nvtop-style box titled with the GPU name, current compute % and memory % (GiB); inside, two continuous polylines (─ │ ╭ ╮ ╰ ╯, one tick per column) over a 10- or 6-row area: compute utilization (green) and system memory in use ÷ MemTotal (yellow), the GPU/MEM pair nvtop plots. nvtop's algorithm: values rounded to rows (0 % bottom, 100 % top), ─ for flat, ┌ ┐ └ ┘ + │ for a change, two columns per tick with one series moving per column and the other continued flat, ┬ ┴ ┼ where a vertical run crosses the other line; `100%`, `50%`, `0%` labels at the left |
+| **Procs** | whatever is left, at least 4 (header + 2 + summary) | `PID USER CPU% GPU% RSS GPUMEM NAME COMMAND` (`GPU%`/`GPUMEM` only with a GPU; COMMAND is the space-joined argv, dim, cut at the screen edge), sorted by the `s` key (cpu, gpu, rss); running processes in bold; summary line with the process count, the sort key, the GPU process count, the NVML sum and the meminfo residual. `--once` shows up to 15 rows, `--json` 20 |
 | **Footer** | 1 | keys, current interval, and edgetop's own cost: `self 0.01% 1.1M` from `/proc/self/schedstat` (ns-exact) and `statm` so the budget is always visible |
 
 Color: 16-color ANSI only. Thresholds: utilization green < 50 %, yellow < 80 %, red ≥ 80 %; temperature
@@ -236,16 +243,38 @@ green < 70 °C, yellow < 85 °C, red ≥ 85 °C. `NO_COLOR` or `--no-color` disa
 so it reads on light and dark terminals.
 
 Keys: `q` quit, `+`/`-` interval ×2 / ÷2 (0.25–10 s), `p` pause, `g` toggle process panel, `s` cycle the
-sort key, `c` cycle core cell density (bar+MHz / bar only / compact).
+sort key, `c` cycle core cell density (box / bar+MHz / bar only / compact).
 
-Vertical resizing: the process list is the flexible element and shrinks first. When fewer than four rows
-would remain for it, core cells step to the next denser form (bar, then compact) before the list is
-dropped; the fixed panels never move. Measured on 80 columns: 30 rows → 12 processes, 24 → 6, 22 → 4,
-20 → 2, 18 → bar cells with 2, 16 → compact cells with 3, 12 → compact with 2. When the panel has no room
-the `/proc` scan is skipped, so a short window costs nothing extra.
+### Layout planner
+
+`plan_layout()` starts from the richest layout and removes one element per step until the rows fit:
+
+1. core boxes 6 → 4 rows (4-row → 2-row graph; width 26 plus a gap)
+2. core boxes → full cells
+3. GPU history box 16 → 12 → 8 rows (14 → 10 → 6-row graph); the GPU graph outranks core graphs
+4. GPU history box off
+5. core cells: full → bar → compact
+6. the process list (it otherwise takes every remaining row, minimum 4)
+7. the core panel
+8. the second Temp row, then footer, then header, then Temp entirely, then the Mem detail row, and as the
+   very last step the GPU status line, so three rows still show CPU, GPU and Mem
+
+CPU, GPU and Mem bars are never removed; below 40 columns or 3 rows a one-line message is shown. Graph
+features (steps 1–4) are only kept while the process list would still have at least 8 rows, so they appear
+on large terminals and never squeeze the list. Measured: 160x50 → the 16-row GPU box and 4-row core boxes;
+100x40 → the 16-row GPU box above full cells; 80x24 → neither. Measured on 80 columns with the two-row GPU panel: 24 rows → 5 processes,
+8 rows → header, CPU, GPU (2), Mem (2), Temp (1), footer; 5 → CPU, GPU (2), Mem (2); 4 → CPU, GPU (2),
+Mem; 3 → CPU, GPU, Mem. At 100x40 and 160x50 the
+the core boxes and the GPU box are on. `main.c` runs the same planner before sampling and skips the `/proc`
+scan when the list would be hidden.
+
+Glyphs: block characters are used by default when the locale is UTF-8 (`LC_ALL`/`LC_CTYPE`/`LANG`);
+`--ascii` forces plain characters, `--unicode` forces unicode glyphs. Horizontal bars use `|` by default
+(the htop/nvtop look); full-height block glyphs fill the whole cell and look taller than the `[` `]`
+around them, so they are opt-in via `--bars blocks`, as is the text-height line style via `--bars line`.
 
 `--json` emits one object (sizes in KiB, absent metrics `null`):
-`{ts, uptime_s, load:[1,5,15], tasks:{running,total}, cpu:{total_pct, user_pct, system_pct, iowait_pct, psi_some10, cores:[{id, cluster, pct, mhz}]}, gpu:{name, util_pct, membw_pct, sm_mhz, power_w, temp_c, pstate, clock_event_reasons, procs:[{pid, mem_mib}]}, mem:{total_kib, used_kib, apps_kib, gpu_kib, kernel_kib, cache_kib, free_kib, avail_kib, gpu_procs_kib, swap_total_kib, swap_free_kib, psi_some10}, temp:{cpu_c, gpu_c, nvme_c, cpu_source:"labeled"|"max_zone", zones:[{label, c}]}, procs:[{pid, user, cpu_pct, rss_kib, gpu_mib, name}] (top 20 by the sort key), self:{cpu_pct, rss_kib}}`.
+`{ts, uptime_s, load:[1,5,15], tasks:{running,total}, cpu:{total_pct, user_pct, system_pct, iowait_pct, psi_some10, cores:[{id, cluster, pct, mhz}]}, gpu:{name, util_pct, membw_pct, sm_mhz, power_w, power_instant_w, power_capped_pct, temp_c, pstate, clock_event_reasons, procs:[{pid, mem_mib, sm_pct}]}, mem:{total_kib, used_kib, apps_kib, gpu_kib, kernel_kib, cache_kib, free_kib, avail_kib, gpu_procs_kib, swap_total_kib, swap_free_kib, psi_some10}, temp:{cpu_c, gpu_c, nvme_c, cpu_source:"labeled"|"max_zone", zones:[{label, c}]}, procs:[{pid, user, cpu_pct, gpu_pct, rss_kib, gpu_mib, name, cmd}] (top 20 by the sort key), self:{cpu_pct, rss_kib}}`.
 `gpu` is `null` with `--no-gpu` or without a driver.
 
 ## Layout (80×24, captured from the running TUI)
@@ -297,6 +326,9 @@ state, and every source is ≈ 3× slower while the GPU is busy.
 | `thermal_zone*/temp` × 7 | 44–48 µs | 151 µs | 2 s cadence |
 | nvme `temp1_input` | **714 µs** | — | 10 s cadence |
 | NVML util / power | 0.2 µs | 348 / 289 µs | every tick (core metrics) |
+| NVML `POWER_INSTANT` field / clock-event reasons | 0.5 / 2 µs | 11 / 7 µs | every tick |
+| NVML `TotalEnergyConsumption` | **2.7 ms** | 2.4 ms | not used |
+| NVML `ViolationStatus(POWER)` | **1.0 ms** | 2.3 ms | 3 s cadence, busy only |
 | NVML temp / SM clock / pstate | < 0.4 µs | 78 / 63 / 12 µs | every tick |
 | NVML clock-event reasons | 0.2 µs | 73 µs | 3 s cadence |
 | NVML compute + graphics process lists | 102 µs | 768 µs | 3 s cadence |

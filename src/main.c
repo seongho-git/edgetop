@@ -102,11 +102,15 @@ static void usage(FILE *fp)
 		"      --no-gpu       do not load NVML (saves ~15 MB)\n"
 		"      --no-procs     skip the process list and its /proc scan\n"
 		"      --no-color     disable colors (also honors NO_COLOR)\n"
-		"      --unicode      draw bars with block glyphs\n"
+		"      --unicode      unicode glyphs for bars and graphs (default in a UTF-8 locale)\n"
+		"      --ascii        plain ASCII bars and graphs\n"
+		"      --bars STYLE   horizontal bar style: ascii (default, like htop), line, blocks\n"
+		"      --no-graphs    never show core boxes or the GPU history graph\n"
 		"      --bench N      time N sample+render ticks and exit\n"
 		"  -h, --help         show this help\n"
 		"  -V, --version      show version\n"
-		"\nkeys: q quit, +/- interval, p pause, g process list, s sort (cpu/gpu/rss), c core cell density\n",
+		"\nkeys: q quit, +/- interval, p pause, g process list, s sort (cpu/gpu/rss),\n"
+		"      c core cells (box/full/bar/compact)\n",
 		MIN_INTERVAL, MAX_INTERVAL);
 }
 
@@ -272,8 +276,22 @@ static int handle_keys(struct ui *ui, double *deadline, double last)
 /* Skip the /proc scan entirely when the panel is off or the screen has no room for it. */
 static int want_procs(const struct ui *ui)
 {
-	return ui->show_procs &&
-	       proc_rows_available(&sp, view.s, ui, frame.rows, frame.cols) >= 3;
+	struct layout L;
+
+	plan_layout(&sp, view.s, ui, frame.rows, frame.cols, &L);
+	return ui->show_procs && L.proc_rows > 0;
+}
+
+static int utf8_locale(void)
+{
+	const char *vars[] = {"LC_ALL", "LC_CTYPE", "LANG"};
+
+	for (size_t i = 0; i < sizeof vars / sizeof vars[0]; i++) {
+		const char *v = getenv(vars[i]);
+		if (v && *v)
+			return strstr(v, "UTF-8") || strstr(v, "utf-8") || strstr(v, "UTF8") || strstr(v, "utf8");
+	}
+	return 0;
 }
 
 static int run_tui(struct ui *ui)
@@ -312,6 +330,7 @@ static int run_tui(struct ui *ui)
 			compute_view(&sp, &samples[cur ^ 1], &samples[cur], ui->sort, &view);
 			last = samples[cur].t;
 			deadline = last + ui->interval;
+			history_push(&sp.hist, &view);
 			draw(ui, full);
 			full = 0;
 			continue;
@@ -347,7 +366,9 @@ static int run_tui(struct ui *ui)
 
 int main(int argc, char **argv)
 {
-	struct ui ui = {.density = D_FULL, .show_procs = 1, .sort = SORT_CPU, .color = 1, .interval = 1.0};
+	struct ui ui = {.density = D_FULL, .graphs = 1, .show_procs = 1, .sort = SORT_CPU, .color = 1,
+			.bars = -1, .interval = 1.0};
+	int ascii = 0;
 	int once = 0, json = 0, gpu = 1, bench = 0;
 	double watch = 0;
 	int rc;
@@ -389,6 +410,22 @@ int main(int argc, char **argv)
 			ui.color = 0;
 		} else if (!strcmp(a, "--unicode")) {
 			ui.unicode = 1;
+		} else if (!strcmp(a, "--ascii")) {
+			ascii = 1;
+		} else if (!strcmp(a, "--bars") && val) {
+			if (!strcmp(val, "line"))
+				ui.bars = BARS_LINE;
+			else if (!strcmp(val, "blocks"))
+				ui.bars = BARS_BLOCKS;
+			else if (!strcmp(val, "ascii"))
+				ui.bars = BARS_ASCII;
+			else {
+				fprintf(stderr, "edgetop: unknown bar style '%s' (line, blocks, ascii)\n", val);
+				return 2;
+			}
+			i++;
+		} else if (!strcmp(a, "--no-graphs")) {
+			ui.graphs = 0;
 		} else if (!strcmp(a, "-h") || !strcmp(a, "--help")) {
 			usage(stdout);
 			return 0;
@@ -403,6 +440,10 @@ int main(int argc, char **argv)
 	}
 	if (getenv("NO_COLOR") && *getenv("NO_COLOR"))
 		ui.color = 0;
+	if (!ascii && !ui.unicode)
+		ui.unicode = utf8_locale();
+	if (ui.bars < 0)
+		ui.bars = BARS_ASCII; /* htop/nvtop look; --bars line|blocks for the others */
 	if (once && !isatty(STDOUT_FILENO))
 		ui.color = 0;
 	ui.once = once || json;

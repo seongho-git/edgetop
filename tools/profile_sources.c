@@ -56,17 +56,18 @@ int main(void)
 		read_fd(sp.fd_psi_mem, small, 256); read_fd(sp.fd_uptime, small, 256));
 	MEASURE("self statm + schedstat", (void)0, read_fd(sp.fd_statm, small, 256); read_fd(sp.fd_schedstat, small, 256));
 	MEASURE("cpuinfo_avg_freq x ncpu", s.t = mono_now(), topo_read(&sp.topo, &s));
-	MEASURE("thermal zones (forced)", sp.th.zone_t = -1e9; s.t = 0, thermal_read(&sp.th, &s));
-	MEASURE("nvme temp (forced)", sp.th.nvme_t = -1e9; sp.th.zone_t = 1e9; s.t = 0, thermal_read(&sp.th, &s));
+	MEASURE("thermal zones", sp.th.nvme_t = 1e9; s.t = 0, thermal_read(&sp.th, &s));
+	MEASURE("thermal zones + nvme (forced)", sp.th.nvme_t = -1e9; s.t = 0, thermal_read(&sp.th, &s));
 	if (!sp.gpu_on) {
 		printf("(no GPU: NVML rows skipped)\n");
 		return 0;
 	}
-	MEASURE("nvml util", sp.gpu.supported = GF_UTIL, gpu_read(&sp.gpu, &s.gpu, 0));
-	MEASURE("nvml power", sp.gpu.supported = GF_POWER, gpu_read(&sp.gpu, &s.gpu, 0));
-	MEASURE("nvml temp + sm clock + pstate", sp.gpu.supported = GF_TEMP | GF_SM | GF_PSTATE, gpu_read(&sp.gpu, &s.gpu, 0));
-	MEASURE("nvml clock-event reasons (forced)", sp.gpu.supported = GF_REASONS; sp.gpu.slow_t = -1e9, gpu_read(&sp.gpu, &s.gpu, 0));
-	MEASURE("nvml process lists (forced)", sp.gpu.supported = GF_PROCS; sp.gpu.slow_t = -1e9, gpu_read(&sp.gpu, &s.gpu, 0));
+	MEASURE("nvml util", sp.gpu.supported = GF_UTIL, gpu_read(&sp.gpu, &s.gpu, 0, 0));
+	MEASURE("nvml power", sp.gpu.supported = GF_POWER, gpu_read(&sp.gpu, &s.gpu, 0, 0));
+	MEASURE("nvml temp + sm clock + pstate", sp.gpu.supported = GF_TEMP | GF_SM | GF_PSTATE, gpu_read(&sp.gpu, &s.gpu, 0, 0));
+	MEASURE("nvml clock-event reasons (forced)", sp.gpu.supported = GF_REASONS; sp.gpu.slow_t = -1e9, gpu_read(&sp.gpu, &s.gpu, 0, 0));
+	MEASURE("nvml process lists (forced)", sp.gpu.supported = GF_PROCS; sp.gpu.slow_t = -1e9, gpu_read(&sp.gpu, &s.gpu, 0, 0));
+	MEASURE("nvml process utilization (forced)", sp.gpu.supported = GF_PROCS | GF_PUTIL; sp.gpu.slow_t = -1e9, gpu_read(&sp.gpu, &s.gpu, 0, 1));
 	sampler_close(&sp);
 	return 0;
 }

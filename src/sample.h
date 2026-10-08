@@ -11,6 +11,7 @@
 #define PROC_TABLE 4096
 #define MAX_VIEW_PROCS 64
 #define MAX_USERS 32
+#define HIST_LEN 512 /* samples kept per series; one per tick */
 #define TEMP_NONE INT_MIN
 
 enum sort_key { SORT_CPU, SORT_GPU, SORT_RSS, SORT_COUNT };
@@ -36,17 +37,22 @@ enum gpu_field {
 	GF_PSTATE = 1 << 4,
 	GF_REASONS = 1 << 5,
 	GF_PROCS = 1 << 6,
+	GF_PUTIL = 1 << 7, /* per-process SM utilization samples */
+	GF_PINST = 1 << 8, /* instantaneous power (field value) */
+	GF_VIOL = 1 << 9,  /* power-cap share (capped_pct) is valid */
 };
 
 struct gpu_proc {
 	uint32_t pid;
 	uint64_t mem_bytes;
+	unsigned sm_pct; /* SM utilization over the last sample window, 0 when unknown */
 };
 
 struct gpu_sample {
 	unsigned have; /* gpu_field bits valid in this sample */
-	unsigned util, membw, sm_mhz, power_mw, temp_c, pstate;
+	unsigned util, membw, sm_mhz, power_mw, power_inst_mw, temp_c, pstate;
 	uint64_t reasons;
+	double capped_pct; /* share of the last slow window spent power-capped; only sampled while busy */
 	int nproc;
 	struct gpu_proc procs[MAX_GPU_PROCS];
 };
@@ -111,8 +117,11 @@ struct gpu {
 	char name[64];
 	unsigned supported; /* gpu_field bits not yet seen as NOT_SUPPORTED */
 	double slow_t;
-	int procs_ok, reasons_ok;
-	uint64_t reasons;
+	int procs_ok;
+	unsigned long long viol_ns; /* violation counter at the last busy slow tick */
+	double viol_t;
+	double capped_pct;
+	unsigned long long putil_ts; /* newest utilization sample seen, passed as lastSeenTimeStamp */
 	int nproc;
 	struct gpu_proc procs[MAX_GPU_PROCS];
 };
@@ -133,6 +142,7 @@ struct proc_entry {
 	char state;
 	char comm[16];
 	char name[24];
+	char cmd[80]; /* argv joined by spaces, truncated */
 };
 
 struct proc_list {
@@ -149,7 +159,16 @@ struct proc_table {
 	struct uid_name users[MAX_USERS];
 };
 
+/* Ring of per-tick percentages for sparklines and the GPU graph. */
+struct history {
+	int len, head;
+	uint8_t core[MAX_CPUS][HIST_LEN];
+	uint8_t gpu[HIST_LEN]; /* compute (SM) utilization */
+	uint8_t mem[HIST_LEN]; /* system memory used, percent of MemTotal */
+};
+
 struct sampler {
+	struct history hist;
 	struct topo topo;
 	struct thermal th;
 	struct gpu gpu;
@@ -165,7 +184,9 @@ struct view_proc {
 	uint32_t pid;
 	const char *user;
 	const char *name;
+	const char *cmd;
 	double cpu_pct;
+	double gpu_pct;
 	uint64_t rss_kib;
 	uint64_t gpu_bytes;
 	char state;
@@ -204,7 +225,8 @@ void thermal_read(struct thermal *th, struct sample *s);
 
 /* nvml.c */
 int gpu_init(struct gpu *g);
-void gpu_read(struct gpu *g, struct gpu_sample *out, double now);
+/* want_putil: query per-process utilization (expensive); only when the process panel is shown */
+void gpu_read(struct gpu *g, struct gpu_sample *out, double now, int want_putil);
 void gpu_shutdown(struct gpu *g);
 
 /* procs.c */
@@ -221,5 +243,11 @@ void sampler_close(struct sampler *sp);
 void mem_split(const struct meminfo *m, struct view *v);
 void compute_view(struct sampler *sp, const struct sample *prev, const struct sample *cur, int sort,
 		  struct view *v);
+void history_push(struct history *h, const struct view *v);
+/* Value i ticks ago (0 = newest); 0 when there is no such sample. */
+static inline uint8_t history_at(const uint8_t *ring, const struct history *h, int ago)
+{
+	return ago < h->len ? ring[(h->head - 1 - ago + HIST_LEN) % HIST_LEN] : 0;
+}
 
 #endif

@@ -17,3 +17,6 @@ compile_commands.json
 
 # Python bytecode from tools/
 __pycache__/
+
+# Local guidance for Claude Code; intentionally not distributed
+CLAUDE.md

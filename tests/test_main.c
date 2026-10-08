@@ -172,6 +172,28 @@ static void test_render_fits(void)
 		CHECK(frame_encode(&f, &prev, 0, &ui, out, sizeof out) == 0); /* unchanged frame */
 	}
 	CHECK(render_json(&v, out, sizeof out) > 100 && out[0] == '{');
+
+	/* layout planner: degrade in order, never below CPU/GPU/Mem */
+	{
+		struct layout L;
+		ui.density = D_FULL;
+		ui.graphs = 1;
+		sp.th.nzones = 7;
+		plan_layout(&sp, &b, &ui, 50, 160, &L);
+		CHECK(!L.too_small && L.density == D_BOX && L.gpu_graph == 0); /* no GPU in this sampler */
+		plan_layout(&sp, &b, &ui, 30, 100, &L);
+		CHECK(!L.too_small && L.density == D_FULL);
+		plan_layout(&sp, &b, &ui, 24, 80, &L);
+		CHECK(!L.too_small && L.density == D_FULL && L.proc_rows >= 4 && L.temp_rows == 2);
+		plan_layout(&sp, &b, &ui, 8, 129, &L);
+		CHECK(!L.too_small && L.density == D_COUNT && L.proc_rows == 0 && L.mem_rows == 2);
+		plan_layout(&sp, &b, &ui, 3, 80, &L);
+		CHECK(!L.too_small && !L.header && !L.footer && L.temp_rows == 0 && L.mem_rows == 2); /* cpu + mem fill 3 rows */
+		plan_layout(&sp, &b, &ui, 2, 80, &L);
+		CHECK(L.too_small);
+		plan_layout(&sp, &b, &ui, 24, 30, &L);
+		CHECK(L.too_small);
+	}
 }
 
 static void test_procs(void)

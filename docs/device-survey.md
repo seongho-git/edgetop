@@ -57,11 +57,16 @@ NVML probe script live in `log/` (not committed); this document is the durable r
 | `nvmlDeviceGetMemoryInfo` / `_v2` | **NOT_SUPPORTED (rc 3)** — no FB memory on a unified-memory part |
 | `nvmlDeviceGetComputeRunningProcesses_v3` | OK — per-process `usedGpuMemory` is valid (e.g. sglang 97,716 MiB) |
 | `nvmlDeviceGetUtilizationRates` | OK — `gpu` %, `memory` % (memory-controller busy %, *not* capacity) |
-| `nvmlDeviceGetPowerUsage` | OK — mW, average. `nvidia-smi -q` also exposes an instantaneous reading |
+| `nvmlDeviceGetPowerUsage` | OK — mW, driver average |
+| `nvmlDeviceGetFieldValues(POWER_INSTANT=186)` | OK — mW, instantaneous |
+| `nvmlDeviceGetTotalEnergyConsumption` | OK — mJ since driver load, but **2.4–2.7 ms per call**; its window average matched `GetPowerUsage` within 0.12 W, so edgetop does not use it |
+| `nvmlDeviceGetViolationStatus(POWER)` | OK — cumulative ns power-capped, **1–2.3 ms per call**; advances ≈ 50 % of the time at P8 idle, 0 % during a 75 % compute load |
+| `nvmlDeviceGetPowerManagementLimit` / `Enforced` / `Default` / `Constraints` | all NOT_SUPPORTED (no power limit exposed) |
 | `nvmlDeviceGetTemperature(GPU)` | OK |
 | `nvmlDeviceGetClockInfo` GRAPHICS / SM / VIDEO | OK |
 | `nvmlDeviceGetClockInfo` MEM | NOT_SUPPORTED |
 | `nvmlDeviceGetPerformanceState` | OK |
+| `nvmlDeviceGetProcessUtilization` | OK — per-pid SM/mem/enc/dec % samples since a timestamp; returns NOT_FOUND (6) when idle and INSUFFICIENT_SIZE (7) if the buffer is smaller than the sample count (72 seen). **6–11 ms per call** |
 | `nvmlDeviceGetFanSpeed` | NOT_SUPPORTED (passively reported; chassis fan not exposed) |
 | Power limits (current/default/min/max) | N/A in `nvidia-smi -q` |
 | Memory temperature | N/A |
@@ -123,6 +128,9 @@ mixed units (the NVML figure 97,886 MiB is 95.6 GiB, not 97.9) and double-counte
 - hwmon: `hwmon0 acpitz` (same 7 zones), `hwmon1 nvme` (Composite / Sensor 1 / Sensor 2, ≈ 44 °C),
   `hwmon2–5 mlx5` (NIC), `hwmon6 mt7925_phy0` (Wi-Fi). Only `nvme` has labels.
 - No `/sys/class/power_supply` entries (no battery, no reported PSU).
+- **No CPU or system power sensor.** No `/sys/class/powercap` (no RAPL on this Arm platform), no hwmon
+  `power*`/`energy*`/`curr*` attributes; the `LNXPOWER` ACPI objects are power resources, not meters. The
+  only power figures on this machine are the GPU's.
 - `/proc/stat` and `/proc/PID/stat` are in `USER_HZ` = 100 ticks per second (`getconf CLK_TCK`), so a
   per-core or per-process CPU percentage over a 1 s window has 1 % resolution, the same as htop; the
   kernel itself runs at `CONFIG_HZ=1000`.
@@ -137,9 +145,9 @@ mixed units (the NVML figure 97,886 MiB is 95.6 GiB, not 97.9) and double-counte
 | After `nvmlInit` | RSS 19.7 MB, **15.0 MB private anonymous**, 1 extra thread |
 | `nvmlInit` wall time | 5.2 ms |
 | Effect of `NVML_INIT_FLAG_NO_ATTACH`, `MALLOC_ARENA_MAX=1`, `malloc_trim(0)` | none (±10 kB) |
-| edgetop, steady state at 1 s, machine idle, process list on | 0.28 % of one core, RSS 21 MB (1.7 MB with `--no-gpu`) |
-| edgetop, same with `--no-procs` | 0.04–0.08 % of one core, RSS 20.4 MB (1.4 MB with `--no-gpu`) |
-| edgetop while GPU at 87 % and 4 cores spinning | 0.87 % of one core with the process list, 0.18 % without |
+| edgetop, steady state at 1 s, machine idle, process list on | 0.21–0.29 % of one core (80x24 and 160x50 with graphs), RSS 21 MB (2.0 MB with `--no-gpu`) |
+| edgetop, same with `--no-procs` | 0.05–0.08 % of one core, RSS 20.4 MB (1.5 MB with `--no-gpu`) |
+| edgetop while GPU at 75–87 % and cores spinning | 0.9–1.3 % of one core with the process list (≈ 0.3 % of it is `GetProcessUtilization`, ≈ 0.1 % the power-cap counter), 0.18 % without |
 | A full `/proc` scan (readdir + `/proc/PID/stat` for ≈ 560 processes) | 1.8 ms hot, 3.3 ms cold, before parsing |
 | edgetop's effect on a pinned CPU benchmark / on GPU idle power | none measurable (36608 vs 36608 iterations; 11.46 vs 11.48 W) |
 | htop 3.3.0 / nvtop 3.0.2, same harness | 2.26 % / 0.80 % of one core, RSS 5.4 / 23 MB |
