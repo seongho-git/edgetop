@@ -21,7 +21,6 @@ void procs_init(struct proc_table *t)
 	/* no memset: the lists are large and must not be touched before the first scan */
 	t->a.n = t->b.n = 0;
 	t->a.t = t->b.t = 0;
-	t->nscans = 0;
 	memset(t->users, 0, sizeof t->users);
 	t->cur = &t->a;
 	t->prev = &t->b;
@@ -65,17 +64,17 @@ static void identify(struct proc_table *t, struct proc_entry *e, const char *com
 	n = read_path(path, buf, sizeof buf);
 	e->cmd[0] = '\0';
 	if (n > 0 && buf[0]) {
-		/* argv is NUL-separated; keep a space-joined copy for the COMMAND column */
+		/* argv is NUL-separated: keep a space-joined copy, and take the name from argv[0],
+		 * which keeps titles set via setproctitle (comm is cut at 15 chars) */
+		char *base, *end;
 		size_t k = 0;
+
 		for (ssize_t i = 0; i < n && k + 1 < sizeof e->cmd; i++)
 			e->cmd[k++] = buf[i] ? buf[i] : ' ';
 		while (k && e->cmd[k - 1] == ' ')
 			k--;
 		e->cmd[k] = '\0';
-	}
-	if (n > 0 && buf[0]) {
-		/* argv[0] keeps names set via setproctitle; comm is cut at 15 chars */
-		char *base, *end = strpbrk(buf, "\n ");
+		end = strpbrk(buf, "\n ");
 		if (end)
 			*end = '\0';
 		base = strrchr(buf, '/');
@@ -196,7 +195,6 @@ int procs_scan(struct proc_table *t, double now)
 	cur->t = now;
 	t->cur = cur;
 	t->prev = prev;
-	t->nscans++;
 	return cur->n;
 }
 

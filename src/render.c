@@ -20,8 +20,6 @@
 #define MIN_COLS 40
 #define MIN_ROWS 3
 
-/* Lower blocks for vertical graphs (U+2581..U+2588); left blocks (GLYPH_BASE) draw horizontal bars. */
-#define GLYPH_VBASE 0x90
 static struct frame *F;
 
 static void clear(struct frame *f)
@@ -114,6 +112,8 @@ static void set_cell(int row, int col, uint16_t ch, unsigned char color)
 	}
 }
 
+#define MAX_SERIES 2
+
 /*
  * Line plot after nvtop's plot.c: values are rounded to rows (0 % on the bottom row, 100 % on the
  * top), flat segments are ─, a change is drawn in one column as two corners joined by │. With n series
@@ -121,8 +121,6 @@ static void set_cell(int row, int col, uint16_t ch, unsigned char color)
  * and where the moving line's vertical run meets another line a junction (┬ ┴ ┼) is drawn instead of
  * overwriting it. Newest tick at the right.
  */
-#define MAX_SERIES 2
-
 static void plot_lines(int r_top, int rows, int c_left, int cells, int nser,
 		       const uint8_t *const ring[], const unsigned char color[],
 		       const struct history *h, const struct ui *ui)
@@ -197,7 +195,6 @@ struct seg {
 	char mono; /* glyph used without color, so segments stay distinguishable */
 };
 
-/* Draws [bar text] in width w at (r, c); bar cells stop where the right-aligned text starts. */
 /*
  * Draws [bar text] in width w. Line style fills with ━ in half-cell steps (╸) over a dim ─ track;
  * block style uses 1/8-cell left blocks; ASCII uses | (or one glyph per segment without color).
@@ -264,13 +261,10 @@ static void fmt_uptime(char *b, size_t n, double up)
 static int panel_header(int r, const struct view *v, const struct ui *ui)
 {
 	const struct sample *s = v->s;
-	char up[32], clock[16];
+	char up[32], clock[16], load[64] = "";
 	time_t now = time(NULL);
 	struct tm tm;
-	int c;
-
-	char load[64] = "";
-	int room;
+	int c, room;
 
 	localtime_r(&now, &tm);
 	strftime(clock, sizeof clock, "%H:%M:%S", &tm);
@@ -319,7 +313,7 @@ static void core_cell(int r, int c, int cpu, const struct view *v, const struct 
 			snprintf(title, sizeof title, " %d  %3.0f%%  idle ", cpu, busy);
 		box(r, c, BOX_W, cur_box_rows, title, util_color(busy), ui);
 		{
-			/* the whole line takes the color of the current load: green, yellow from 50 %, red from 80 % */
+			/* the whole line takes the color of the current load */
 			const uint8_t *const ring[1] = {h->core[cpu]};
 			const unsigned char col[1] = {util_color(busy)};
 			plot_lines(r + 1, cur_box_rows - 2, c + 1, BOX_W - 2, 1, ring, col, h, ui);
@@ -462,8 +456,8 @@ static int panel_gpu(int r, int rows, const struct view *v, const struct ui *ui)
 		return r;
 
 	/*
-	 * Status row, always present unless the terminal has only three rows. The driver reports "SW power cap" and power-cap violation time
-	 * while it merely holds idle clocks down, so those only count as throttling when the GPU is busy.
+	 * Status row. The driver reports "SW power cap" and power-cap violation time while it merely
+	 * holds idle clocks down, so those only count as throttling when the GPU is busy.
 	 */
 	c = put(r, LABEL_W, C_DIM, "throttle: ");
 	if (!(g->have & GF_REASONS)) {
@@ -831,7 +825,7 @@ void render(struct frame *f, const struct view *v, const struct ui *ui)
 
 static const char *const sgr[] = {
 	[C_DEF] = "\033[0m",      [C_RED] = "\033[0;31m",  [C_GREEN] = "\033[0;32m",
-	[C_YELLOW] = "\033[0;33m", [C_BLUE] = "\033[0;34m", [C_MAGENTA] = "\033[0;38;5;164m",
+	[C_YELLOW] = "\033[0;33m", [C_MAGENTA] = "\033[0;38;5;164m",
 	[C_CYAN] = "\033[0;36m",  [C_DIM] = "\033[0;90m",  [C_BOLD] = "\033[0;1m",
 	[C_TITLE] = "\033[0;1;36m",
 };
@@ -839,9 +833,6 @@ static const char *const sgr[] = {
 /* U+258F..U+2588: left blocks of 1/8 .. 8/8 width */
 static const char *const blocks[9] = {
 	" ", "▏", "▎", "▍", "▌", "▋", "▊", "▉", "█",
-};
-static const char *const vblocks[9] = {
-	" ", "\u2581", "\u2582", "\u2583", "\u2584", "\u2585", "\u2586", "\u2587", "\u2588",
 };
 
 static size_t emit_row(const struct frame *f, int r, int width, const struct ui *ui, char *out,
@@ -868,11 +859,6 @@ static size_t emit_row(const struct frame *f, int r, int width, const struct ui 
 							      "\u250c", "\u2510", "\u2514", "\u2518", "\u252c",
 							      "\u2534", "\u253c"};
 			s = lines[ch - GLYPH_LINE_FULL];
-			len = strlen(s);
-			memcpy(out + n, s, len);
-			n += len;
-		} else if (ch >= GLYPH_VBASE) {
-			s = vblocks[ch - GLYPH_VBASE];
 			len = strlen(s);
 			memcpy(out + n, s, len);
 			n += len;

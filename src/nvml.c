@@ -11,7 +11,10 @@
 #define NVML_TEMPERATURE_GPU 0
 #define NVML_CLOCK_SM 1
 #define NVML_VALUE_NOT_AVAILABLE ((unsigned long long)-1)
-#define SLOW_PERIOD 3.0 /* process list (~770 us cold) and clock-event reasons (~70 us cold) */
+#define NVML_FI_DEV_POWER_INSTANT 186
+#define NVML_PERF_POLICY_POWER 0
+#define PUTIL_MAX 256
+#define SLOW_PERIOD 3.0 /* process lists, per-process utilization and the power-cap counter cost 1-11 ms */
 
 typedef void *nvml_dev;
 typedef struct {
@@ -27,8 +30,6 @@ typedef struct {
 	unsigned long long ts;
 	unsigned sm, mem, enc, dec;
 } nvml_putil;
-#define NVML_ERROR_NOT_FOUND 6
-#define PUTIL_MAX 256
 
 typedef int (*fn_void)(void);
 typedef int (*fn_handle)(unsigned, nvml_dev *);
@@ -56,8 +57,6 @@ typedef struct {
 	} v;
 } nvml_fval;
 typedef int (*fn_fields)(nvml_dev, int, nvml_fval *);
-#define NVML_FI_DEV_POWER_INSTANT 186
-#define NVML_PERF_POLICY_POWER 0
 
 static struct {
 	fn_void init, shutdown;
@@ -238,9 +237,8 @@ void gpu_read(struct gpu *g, struct gpu_sample *out, double now, int want_putil)
 				g->supported &= ~(unsigned)GF_PROCS;
 		}
 		/*
-		 * ~6-11 ms per call on GB10 even when idle, hence the slow cadence and two gates: only while the
-		 * process panel is shown, and only if the device itself reported activity (no process can have
-		 * SM time when device utilization is 0). NOT_FOUND means no GPU work since the last call.
+		 * 6-11 ms per call even when idle, so it runs only while the process panel is shown and the
+		 * device reported activity (no process can have SM time at 0 % utilization).
 		 */
 		for (int i = 0; i < g->nproc; i++)
 			g->procs[i].sm_pct = 0;

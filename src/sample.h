@@ -99,7 +99,6 @@ struct topo {
 struct zone_info {
 	char label[12];
 	int kind; /* zone_kind */
-	int cluster;
 };
 
 struct thermal {
@@ -155,11 +154,10 @@ struct proc_table {
 	struct proc_list a, b;
 	struct proc_list *cur, *prev;
 	long clk_tck, page_kib;
-	unsigned nscans;
 	struct uid_name users[MAX_USERS];
 };
 
-/* Ring of per-tick percentages for sparklines and the GPU graph. */
+/* Ring of per-tick percentages for the core and GPU graphs. */
 struct history {
 	int len, head;
 	uint8_t core[MAX_CPUS][HIST_LEN];

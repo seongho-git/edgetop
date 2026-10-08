@@ -37,7 +37,6 @@ static void classify(int id, struct zone_info *z)
 	char path[128], buf[128], *nl, *name;
 
 	z->kind = Z_OTHER;
-	z->cluster = -1;
 	snprintf(path, sizeof path, "/sys/class/thermal/thermal_zone%d/device/path", id);
 	if (read_path(path, buf, sizeof buf) > 0) {
 		if ((nl = strchr(buf, '\n')))
@@ -62,8 +61,7 @@ static void classify(int id, struct zone_info *z)
 		if (name[0] == 'T' && name[1] == 'S' && name[2] >= '0' && name[2] <= '9' &&
 		    (name[3] == 'E' || name[3] == 'P') && !name[4]) {
 			z->kind = name[3] == 'P' ? Z_PCORE : Z_ECORE;
-			z->cluster = name[2] - '0';
-			snprintf(z->label, sizeof z->label, "c%d%c", z->cluster, name[3] == 'P' ? 'p' : 'e');
+			snprintf(z->label, sizeof z->label, "c%c%c", name[2], name[3] == 'P' ? 'p' : 'e');
 			return;
 		}
 	}

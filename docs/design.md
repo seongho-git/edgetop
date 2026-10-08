@@ -1,6 +1,6 @@
 # edgetop — Design Proposal
 
-Status: implemented in v0.1.0 (design by Fable, implementation by Opus 5.5). Change this document first when a
+Status: implemented (v0.2.0; design by Fable, implementation by Opus 5.5). Change this document first when a
 decision changes during implementation.
 
 ## Goal
@@ -165,7 +165,7 @@ frame; slow sensors on a longer cadence.
 ### Nice to have (later, off by default)
 
 Disk throughput (`/proc/diskstats`), network throughput (`/sys/class/net/*/statistics`), per-core
-config file for panel order. (`NO_COLOR` / `--no-color` and history graphs shipped since.)
+config file for panel order. (`NO_COLOR` / `--no-color` and history graphs have since shipped.)
 
 ### Memory decomposition shown in the Mem bar
 

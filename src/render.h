@@ -9,10 +9,10 @@
 #define MAX_ROWS 200
 #define MAX_COLS 400
 
-/* C_MAGENTA is 256-color index 164 (#d700d7): magenta hue without the neon brightness of 201; slot 35 renders purple in most themes. */
-enum color { C_DEF, C_RED, C_GREEN, C_YELLOW, C_BLUE, C_MAGENTA, C_CYAN, C_DIM, C_BOLD, C_TITLE };
+/* C_MAGENTA is 256-color index 164: palette magenta (35) renders purple in most themes. */
+enum color { C_DEF, C_RED, C_GREEN, C_YELLOW, C_MAGENTA, C_CYAN, C_DIM, C_BOLD, C_TITLE };
 
-/* Cells hold ASCII or glyph codes: GLYPH_BASE + n is the n/8 left block (block-style bars). */
+/* Frame cells hold ASCII or one of these glyph codes. GLYPH_BASE + n is the n/8 left block. */
 #define GLYPH_BASE 0x80
 /* Line-style bars: full ━, half ╸, empty track ─ (─ doubles as the box horizontal). */
 #define GLYPH_LINE_FULL 0xa0
@@ -31,7 +31,6 @@ enum color { C_DEF, C_RED, C_GREEN, C_YELLOW, C_BLUE, C_MAGENTA, C_CYAN, C_DIM, 
 
 enum bar_style { BARS_ASCII, BARS_LINE, BARS_BLOCKS };
 
-/* Cells hold ASCII or a GLYPH_* code; 16-bit so the code space has room. */
 struct frame {
 	int rows, cols;
 	uint16_t ch[MAX_ROWS][MAX_COLS];
@@ -56,13 +55,13 @@ struct layout {
 
 struct ui {
 	int density;
-	int graphs; /* allow sparklines and the GPU graph when the screen is large */
+	int graphs; /* allow core boxes and the GPU graph when the screen is large */
 	int show_procs;
 	int sort;
 	int paused;
 	int once;
 	int color;
-	int unicode; /* block glyphs for graphs and sparklines */
+	int unicode; /* box-drawing and block glyphs instead of ASCII */
 	int bars;    /* enum bar_style for the horizontal bars */
 	double interval;
 };

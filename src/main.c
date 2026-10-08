@@ -13,7 +13,7 @@
 #include "term.h"
 #include "util.h"
 
-#define VERSION "0.1.0"
+#define VERSION "0.2.0"
 #define MIN_INTERVAL 0.25
 #define MAX_INTERVAL 10.0
 #define TIMER_SLACK_NS 5000000 /* lets the kernel merge our wakeup with other timers */

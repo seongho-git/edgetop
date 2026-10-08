@@ -1,7 +1,7 @@
-# 임시 파일·로그 전용 폴더 (CLAUDE.md 작업 규칙 1)
+# Temporary files and logs
 log/
 
-# 빌드 산출물
+# Build outputs
 edgetop
 *.o
 *.a
@@ -9,7 +9,7 @@ edgetop
 build/
 compile_commands.json
 
-# 에디터/OS
+# Editors and OS
 .vscode/
 .idea/
 *.swp
