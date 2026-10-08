@@ -78,18 +78,25 @@ Conclusion: never shell out to `nvidia-smi` in the sampling loop; load NVML dire
 ### GPU memory on unified memory
 
 GPU allocations do not appear in `AnonPages`, `Cached`, or `Slab`; they only reduce `MemFree`.
-Verified decomposition from `/proc/meminfo` at survey time:
+Decomposition from `/proc/meminfo` (corrected 2026-10-07 during implementation; see note below):
 
 ```
-used        = MemTotal - MemFree - Buffers - Cached - SReclaimable            = 107.9 GiB
-accounted   = AnonPages + SUnreclaim + KernelStack + PageTables
-            + SecPageTables + Shmem + Percpu + VmallocUsed                     =   9.6 GiB
-unaccounted = used - accounted                                                 =  98.3 GiB
-NVML sum of per-process usedGpuMemory                                          =  97.9 GiB
+cache       = Buffers + (Cached - Shmem) + SReclaimable
+used        = MemTotal - MemFree - cache                                        = 108.3 GiB
+apps        = AnonPages + Shmem                                                 =   7.5 GiB
+kernel      = SUnreclaim + KernelStack + PageTables + SecPageTables
+            + Percpu + VmallocUsed                                              =   2.0 GiB
+residual    = used - apps - kernel                                              =  98.8 GiB
+NVML sum of per-process usedGpuMemory (compute + graphics, 6 processes)         =  96.2 GiB
 ```
 
-The residual matches the NVML process total within 0.4 GiB (driver overhead). Report the residual
-as "GPU/driver" and show the NVML process sum next to it as a cross-check.
+The residual exceeds the NVML process total by ≈ 2.5 GiB, which is GPU memory owned by the driver rather
+than by any process. edgetop reports the residual as "gpu" and prints the NVML sum next to it.
+
+Correction: the first version of this survey reported "98.3 GiB vs 97.9 GiB, within 0.4 GiB". That
+mixed units (the NVML figure 97,886 MiB is 95.6 GiB, not 97.9) and double-counted Shmem (it is inside
+`Cached`, so subtracting `Cached` and then adding `Shmem` back as used under-reports the residual by Shmem).
+`tools/check.py` now verifies these numbers against nvidia-smi on every run.
 
 ## Thermal sensors
 
@@ -106,17 +113,20 @@ as "GPU/driver" and show the NVML process sum next to it as a cross-check.
 
 | Measurement | Result |
 |---|---|
-| Static-feeling C binary that reads `/proc/self/status` | RSS 0.98 MB |
+| Static-feeling C binary that reads `/proc/self/status` | RSS 0.93–0.98 MB |
+| Same with idiomatic C++ (`iostream`, `string`, `vector`) | RSS 2.8 MB, +3 shared libraries |
 | After `dlopen("libnvidia-ml.so.1")` | RSS 1.8 MB |
 | After `nvmlInit` | RSS 19.7 MB, **15.0 MB private anonymous**, 1 extra thread |
 | `nvmlInit` wall time | 5.2 ms |
 | Effect of `NVML_INIT_FLAG_NO_ATTACH`, `MALLOC_ARENA_MAX=1`, `malloc_trim(0)` | none (±10 kB) |
-| Full sampling tick (stat + meminfo + 20 freq + 7 thermal + 5 NVML) with `cpuinfo_avg_freq` | ≈ 125 µs |
-| Same tick using `scaling_cur_freq` | ≈ 2134 µs |
-| nvtop for reference | RSS 23 MB |
+| edgetop v0.1.0, steady state at 1 s, machine idle | 0.04–0.08 % of one core, RSS 20.4 MB (1.5 MB with `--no-gpu`) |
+| edgetop v0.1.0 while GPU at 88 % and 4 cores spinning | 0.18 % of one core |
+| edgetop's effect on a pinned CPU benchmark / on GPU idle power | none measurable (36608 vs 36608 iterations; 11.46 vs 11.48 W) |
+| htop 3.3.0 / nvtop 3.0.2, same harness | 2.26 % / 0.80 % of one core, RSS 5.4 / 23 MB |
 
-Per-source numbers are tabulated in `design.md` ("Measured sampling costs"). Harness sources are kept in
-`log/bench_*.c` for the step 6 perf pass.
+Hot vs cold per-source costs are tabulated in `design.md` ("Measured sampling costs"). After a 1 s
+sleep, sources cost 3–10× their hot-loop figures (cold caches, and wake-up on an A725 core at low clock);
+NVML utilization and power are ≈ 300 µs each when cold.
 
 ## Toolchain and existing tools
 
