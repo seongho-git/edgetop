@@ -7,9 +7,7 @@ Layout and conventions follow [htop](https://htop.dev/) (per-core bars, process 
 [nvtop](https://github.com/Syllo/nvtop) (GPU box with compute and memory lines, per-process GPU
 utilization). The graphs are a port of nvtop's plotting algorithm.
 
-![edgetop screenshot](docs/screenshot.png)
-
-<!-- TODO: replace docs/screenshot.png with a capture of the TUI at about 160x50 -->
+![edgetop running on a DGX Spark](docs/edgetop.png)
 
 ## Footprint
 
